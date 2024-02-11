@@ -20,7 +20,7 @@ You should transfer raw EEG files (such as .cnt, .edf, .bdf, and so on) into hdf
 The neural tokenizer is trained by vector-quantized neural spectrum prediction. It is recommended to train it on platforms with 8 * NVIDIA GeForce RTX 3090 or better GPUs.
 ```bash
 OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_training.py \
-    --output_dir ./checkpoint/vqnsp/ \
+    --output_dir ./checkpoints/vqnsp/ \
     --log_dir ./log/vqnsp/ \
     --model vqnsp_encoder_base_decoder_3x200x12 \
     --codebook_n_emd 8192 \
@@ -38,11 +38,11 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_training.py \
 We pre-train LaBraM by predicting the original neural codes for the masked EEG channel patches.
 ```bash
 OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_labram_pretraining.py \
-        --output_dir ./checkpoint/labram_base \
+        --output_dir ./checkpoints/labram_base \
         --log_dir ./log/labram_base \
         --model labram_base_patch200_1600_8k_vocab \
         --tokenizer_model vqnsp_encoder_base_decoder_3x200x12 \
-        --tokenizer_weight ./checkpoint/vqnsp.pth \
+        --tokenizer_weight ./checkpoints/vqnsp.pth \
         --batch_size 64 \
         --lr 5e-4 \
         --warmup_epochs 5 \
@@ -60,10 +60,10 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_labram_pretraining.
 Before fine-tuning, use the code in dataset_maker/(make_TUAB.py, make_TUEV.py) to preprocess the downstream datasets as well as split data into training, validation, and test set. Notably you are encoraged to try different hyperparameters, such as the learning rate and warmup_epochs which can largely influence the final performance, to get better results. Here is the hyperparameter we used in the paper:
 ```bash
 OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning.py \
-        --output_dir ./checkpoint/finetune_tuab_base/ \
+        --output_dir ./checkpoints/finetune_tuab_base/ \
         --log_dir ./log/finetune_tuab_base \
         --model labram_base_patch200_200 \
-        --finetune ./checkpoint/labram.pth \
+        --finetune ./checkpoints/labram.pth \
         --weight_decay 0.05 \
         --batch_size 64 \
         --lr 5e-4 \
