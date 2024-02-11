@@ -1,0 +1,13 @@
+timm==0.4.12
+Pillow
+blobfile
+mypy
+numpy
+pytest
+requests
+einops
+deepspeed==0.4.0
+scipy
+pyhealth==1.1.4
+h5py
+mne==1.4.2
