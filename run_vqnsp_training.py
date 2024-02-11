@@ -73,11 +73,6 @@ def get_args():
                         help='epochs to warmup LR, if scheduler supports')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='', type=str,
-                        help='dataset path')
-    parser.add_argument('--eval_data_path', default='', type=str, help='dataset path')
-    parser.add_argument('--data_set', default='', type=str, help='dataset path')
-
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
