@@ -73,10 +73,10 @@ def get_args():
                         help='epochs to warmup LR, if scheduler supports')
 
     # Dataset parameters
-    parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
+    parser.add_argument('--data_path', default='', type=str,
                         help='dataset path')
     parser.add_argument('--eval_data_path', default='', type=str, help='dataset path')
-    parser.add_argument('--data_set', default='image_folder', type=str, help='dataset path')
+    parser.add_argument('--data_set', default='', type=str, help='dataset path')
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -314,7 +314,7 @@ def main(args):
         
         if data_loader_val_list is not None:
             test_stats = evaluate(data_loader_val_list, model, device, log_writer, epoch, ch_names_list=val_ch_names_list, args=args)
-            print(f"Validation loss of the network on the {sum([len(dataset) for dataset in dataset_val_list])} test images: {test_stats['loss']:.4f}")
+            print(f"Validation loss of the network on the {sum([len(dataset) for dataset in dataset_val_list])} test EEG: {test_stats['loss']:.4f}")
 
             if log_writer is not None:
                 log_writer.update(**test_stats, head="val/loss")
