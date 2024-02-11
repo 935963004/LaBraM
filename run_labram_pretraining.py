@@ -39,7 +39,7 @@ def get_args():
     parser.add_argument("--tokenizer_model", type=str, default="vqnsp_encoder_base_decoder_3x200x12")
     
     # Model parameters
-    parser.add_argument('--model', default='labram_base_patch16_224_8k_vocab', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='labram_base_patch200_1600_8k_vocab', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--rel_pos_bias', action='store_true')
     parser.add_argument('--disable_rel_pos_bias', action='store_true', dest='rel_pos_bias')
