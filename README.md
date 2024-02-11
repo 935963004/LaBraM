@@ -15,7 +15,7 @@ pip install -r requirements.txt
 ```
 ## Run Experiments
 ### Prepare pre-training data
-You should transfer raw EEG files (such as .cnt, .edf, .bdf, and so on) into hdf5-format files using the example code in dataset_maker/make_h5dataset_for_pretrain.py. Notably, you can also write your own codes for preprocessing EEG data. Make sure that the preprocessing is consistant with that of our paper, that is, removing useless channels, filtering between 0.1 Hz and 75 Hz, notch filtering of 50 Hz, resampling to 200 Hz, and setting the unit to $\mu V$.
+You should transfer raw EEG files (such as .cnt, .edf, .bdf, and so on) into hdf5-format files using the example code in dataset_maker/make_h5dataset_for_pretrain.py. Notably, you can also write your own codes for preprocessing EEG data. Make sure that the preprocessing is consistent with that of our paper, that is, removing useless channels, filtering between 0.1 Hz and 75 Hz, notch filtering of 50 Hz, resampling to 200 Hz, and setting the unit to $\mu V$.
 ### Train the neural tokenizer
 The neural tokenizer is trained by vector-quantized neural spectrum prediction. It is recommended to train it on platforms with 8 * NVIDIA GeForce RTX 3090 or better GPUs.
 ```bash
@@ -57,13 +57,13 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_labram_pretraining.
         --gradient_accumulation_steps 1
 ```
 ### Fine-tune on downstream tasks
-Before fine-tuning, use the code in dataset_maker/(make_TUAB.py, make_TUEV.py) to preprocess the downstream datasets as well as split data into training, validation, and test set. Notably you are encoraged to try different hyperparameters, such as the learning rate and warmup_epochs which can largely influence the final performance, to get better results. Here is the hyperparameter we used in the paper:
+Before fine-tuning, use the code in dataset_maker/(make_TUAB.py, make_TUEV.py) to preprocess the downstream datasets as well as split data into training, validation, and test set. Notably you are encouraged to try different hyperparameters, such as the learning rate and warmup_epochs which can largely influence the final performance, to get better results. Here is the hyperparameter we used in the paper:
 ```bash
 OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning.py \
         --output_dir ./checkpoints/finetune_tuab_base/ \
         --log_dir ./log/finetune_tuab_base \
         --model labram_base_patch200_200 \
-        --finetune ./checkpoints/labram.pth \
+        --finetune ./checkpoints/labram-base.pth \
         --weight_decay 0.05 \
         --batch_size 64 \
         --lr 5e-4 \
