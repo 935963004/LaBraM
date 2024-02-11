@@ -43,7 +43,7 @@ def get_args():
     parser.add_argument('--ema_decay', default=0.99, type=float, metavar='MODEL', help='ema decay for quantizer')
     parser.add_argument('--quantize_kmeans_init', action='store_true', help='enable kmeans_init for quantizer')
 
-    parser.add_argument('--input_size', default=1600, type=int, help='images input size for backbone')
+    parser.add_argument('--input_size', default=1600, type=int, help='EEG input size for backbone')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
