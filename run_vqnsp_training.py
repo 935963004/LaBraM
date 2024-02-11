@@ -34,7 +34,7 @@ def get_args():
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--save_ckpt_freq', default=20, type=int)
     # Model parameters
-    parser.add_argument('--model', default='vqnsp_encoder_base_decoder_3x768x12_clip', type=str, metavar='MODEL',  help='Name of model to train')  
+    parser.add_argument('--model', default='vqnsp_encoder_base_decoder_3x200x12', type=str, metavar='MODEL',  help='Name of model to train')  
 
     parser.add_argument('--codebook_n_emd', default=8192, type=int, metavar='MODEL',
                         help='number of codebook')
