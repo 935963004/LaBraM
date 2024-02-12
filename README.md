@@ -73,7 +73,7 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning.py
         --layer_decay 0.65 \
         --drop_path 0.1 \
         --dist_eval \
-        --save_ckpt_freq 50 \
+        --save_ckpt_freq 5 \
         --disable_rel_pos_bias \
         --abs_pos_emb \
         --dataset TUAB \
