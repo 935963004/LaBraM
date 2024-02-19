@@ -305,7 +305,7 @@ class NeuralTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
 
-        self.patch_embed = TemporalConv(out_chans=out_chans) if in_chans == 1 else PatchEmbed(EEG_size=EEG_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        self.patch_embed = TemporalConv(out_chans=out_chans)
         self.time_window = EEG_size // patch_size
         self.patch_size = patch_size
 
