@@ -312,7 +312,7 @@ class NeuralTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         if use_abs_pos_emb:
-            self.pos_embed = nn.Parameter(torch.zeros(1, 128 + 1, embed_dim), requires_grad=True)
+            self.pos_embed = nn.Parameter(torch.zeros(1, in_chans + 1, embed_dim), requires_grad=True)
         else:
             self.pos_embed = None
         self.time_embed = nn.Parameter(torch.zeros(1, 16, embed_dim), requires_grad=True)
