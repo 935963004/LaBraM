@@ -234,6 +234,10 @@ class TemporalConv(nn.Module):
     """ EEG to Patch Embedding
     """
     def __init__(self, in_chans=1, out_chans=8):
+        '''
+        in_chans: in_chans of nn.Conv2d()
+        out_chans: out_chans of nn.Conv2d(), determing the output dimension
+        '''
         super().__init__()
         self.conv1 = nn.Conv2d(in_chans, out_chans, kernel_size=(1, 15), stride=(1, 8), padding=(0, 7))
         self.gelu1 = nn.GELU()
@@ -256,45 +260,6 @@ class TemporalConv(nn.Module):
         return x
 
 
-class RelativePositionBias(nn.Module):
-
-    def __init__(self, window_size, num_heads):
-        super().__init__()
-        self.window_size = window_size
-        self.num_relative_distance = (2 * window_size[0] - 1) * (2 * window_size[1] - 1) + 3
-        self.relative_position_bias_table = nn.Parameter(
-            torch.zeros(self.num_relative_distance, num_heads))  # 2*Wh-1 * 2*Ww-1, nH
-        # cls to token & token 2 cls & cls to cls
-
-        # get pair-wise relative position index for each token inside the window
-        coords_h = torch.arange(window_size[0])
-        coords_w = torch.arange(window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w]))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-        relative_coords[:, :, 0] += window_size[0] - 1  # shift to start from 0
-        relative_coords[:, :, 1] += window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * window_size[1] - 1
-        relative_position_index = \
-            torch.zeros(size=(window_size[0] * window_size[1] + 1,) * 2, dtype=relative_coords.dtype)
-        relative_position_index[1:, 1:] = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-        relative_position_index[0, 0:] = self.num_relative_distance - 3
-        relative_position_index[0:, 0] = self.num_relative_distance - 2
-        relative_position_index[0, 0] = self.num_relative_distance - 1
-
-        self.register_buffer("relative_position_index", relative_position_index)
-
-        # trunc_normal_(self.relative_position_bias_table, std=.02)
-
-    def forward(self):
-        relative_position_bias = \
-            self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
-                self.window_size[0] * self.window_size[1] + 1,
-                self.window_size[0] * self.window_size[1] + 1, -1)  # Wh*Ww,Wh*Ww,nH
-        return relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-
-
 class NeuralTransformer(nn.Module):
     def __init__(self, EEG_size=1600, patch_size=200, in_chans=1, out_chans=8, num_classes=1000, embed_dim=200, depth=12,
                  num_heads=10, mlp_ratio=4., qkv_bias=False, qk_norm=None, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
@@ -305,6 +270,9 @@ class NeuralTransformer(nn.Module):
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
 
+        # To identify whether it is neural tokenizer or neural decoder. 
+        # For the neural decoder, use linear projection (PatchEmbed) to project codebook dimension to hidden dimension.
+        # Otherwise, use TemporalConv to extract temporal features from EEG signals.
         self.patch_embed = TemporalConv(out_chans=out_chans) if in_chans == 1 else PatchEmbed(EEG_size=EEG_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         self.time_window = EEG_size // patch_size
         self.patch_size = patch_size
@@ -318,10 +286,7 @@ class NeuralTransformer(nn.Module):
         self.time_embed = nn.Parameter(torch.zeros(1, 16, embed_dim), requires_grad=True)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        if use_shared_rel_pos_bias:
-            self.rel_pos_bias = RelativePositionBias(window_size=self.patch_embed.patch_shape, num_heads=num_heads)
-        else:
-            self.rel_pos_bias = None
+        self.rel_pos_bias = None
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.use_rel_pos_bias = use_rel_pos_bias
@@ -424,6 +389,10 @@ class NeuralTransformer(nn.Module):
                 return x[:, 0]
 
     def forward(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
+        '''
+        x: [batch size, number of electrodes, number of patches, patch size]
+        For example, for an EEG sample of 4 seconds with 64 electrodes, x will be [batch size, 64, 4, 200]
+        '''
         x = self.forward_features(x, input_chans=input_chans, return_patch_tokens=return_patch_tokens, return_all_tokens=return_all_tokens, **kwargs)
         x = self.head(x)
         return x
