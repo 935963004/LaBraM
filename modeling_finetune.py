@@ -294,7 +294,7 @@ class NeuralTransformer(nn.Module):
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_norm=qk_norm, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                init_values=init_values, window_size=self.patch_embed.patch_shape if use_rel_pos_bias else None)
+                init_values=init_values, window_size=None)
             for i in range(depth)])
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
@@ -367,9 +367,8 @@ class NeuralTransformer(nn.Module):
 
         x = self.pos_drop(x)
         
-        rel_pos_bias = self.rel_pos_bias() if self.rel_pos_bias is not None else None
         for blk in self.blocks:
-            x = blk(x, rel_pos_bias=rel_pos_bias)
+            x = blk(x, rel_pos_bias=None)
         
         x = self.norm(x)
         if self.fc_norm is not None:
