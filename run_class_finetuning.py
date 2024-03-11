@@ -246,7 +246,9 @@ def main(args, ds_init):
 
     cudnn.benchmark = True
 
-    #dataset_train, args.nb_classes = build_dataset(is_train=True, args=args)
+    # dataset_train, dataset_test, dataset_val: follows the standard format of torch.utils.data.Dataset.
+    # ch_names: list of strings, channel names of the dataset. It should be in capital letters.
+    # metrics: list of strings, the metrics you want to use. We utilize PyHealth to implement it.
     dataset_train, dataset_test, dataset_val, ch_names, metrics = get_dataset(args)
 
     if args.disable_eval_during_finetuning:
