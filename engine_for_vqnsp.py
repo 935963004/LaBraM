@@ -54,10 +54,10 @@ def train_one_epoch(model: torch.nn.Module,
                 for i, param_group in enumerate(optimizer.param_groups):
                     if lr_schedule_values is not None:
                         param_group["lr"] = lr_schedule_values[it] * param_group.get("lr_scale", 1.0)
-            images = batch.float().to(device, non_blocking=True) / 100
+            EEG = batch.float().to(device, non_blocking=True) / 100
 
             with torch.cuda.amp.autocast(enabled=True):
-                loss, log_loss = model(images, input_chans=input_chans)
+                loss, log_loss = model(EEG, input_chans=input_chans)
 
             loss_value = loss.item()
 
