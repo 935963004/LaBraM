@@ -54,7 +54,7 @@ def random_masking(x, mask_ratio):
         return mask.to(torch.bool)
 
 
-def train_one_epoch(model: torch.nn.Module, vqkd: torch.nn.Module,
+def train_one_epoch(model: torch.nn.Module, vqnsp: torch.nn.Module,
                     data_loader_list: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     log_writer=None, lr_scheduler=None, start_steps=None,
@@ -90,7 +90,7 @@ def train_one_epoch(model: torch.nn.Module, vqkd: torch.nn.Module,
 
             with torch.no_grad():
                 with torch.cuda.amp.autocast():
-                    input_ids = vqkd.get_codebook_indices(samples, input_chans)
+                    input_ids = vqnsp.get_codebook_indices(samples, input_chans)
 
                 labels = input_ids[bool_masked_pos]
                 labels_sym = input_ids[~bool_masked_pos]
