@@ -183,7 +183,7 @@ def main(args):
     ]
     dataset_train_list, train_ch_names_list = utils.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
     # prepare visual tokenizer
-    vqkd = get_visual_tokenizer(args).to(device)
+    vqnsp = get_visual_tokenizer(args).to(device)
 
     if True:  # args.distributed:
         num_tasks = utils.get_world_size()
@@ -225,7 +225,7 @@ def main(args):
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
 
-    print("Tokenizer = %s" % str(vqkd))
+    print("Tokenizer = %s" % str(vqnsp))
     total_batch_size = args.batch_size * utils.get_world_size() * args.gradient_accumulation_steps
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
@@ -264,7 +264,7 @@ def main(args):
             log_writer.set_step(epoch * num_training_steps_per_epoch)
 
         train_stats = train_one_epoch(
-            model, vqkd, data_loader_train_list,
+            model, vqnsp, data_loader_train_list,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
