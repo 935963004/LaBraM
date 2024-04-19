@@ -113,7 +113,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         if is_binary:
             class_acc = utils.get_metrics(torch.sigmoid(output).detach().cpu().numpy(), targets.detach().cpu().numpy(), ["accuracy"], is_binary)["accuracy"]
         else:
-            class_acc = (output.max(-1)[-1] == targets).float().mean()
+            class_acc = (output.max(-1)[-1] == targets.squeeze()).float().mean()
             
         metric_logger.update(loss=loss_value)
         metric_logger.update(class_acc=class_acc)
