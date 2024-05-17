@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from functools import partial
 
-from modeling_finetune import Block, _cfg, PatchEmbed, RelativePositionBias
+from modeling_finetune import Block, _cfg, PatchEmbed
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_ as __call_trunc_normal_
 from einops import rearrange
@@ -72,10 +72,7 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
         self.time_embed = nn.Parameter(torch.zeros(1, 16, embed_dim), requires_grad=True)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-        if use_shared_rel_pos_bias:
-            self.rel_pos_bias = RelativePositionBias(window_size=(62, EEG_size // patch_size), num_heads=num_heads)
-        else:
-            self.rel_pos_bias = None
+        self.rel_pos_bias = None
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
