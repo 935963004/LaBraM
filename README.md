@@ -68,8 +68,8 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning.py
         --batch_size 64 \
         --lr 5e-4 \
         --update_freq 1 \
-        --warmup_epochs 5 \
-        --epochs 50 \
+        --warmup_epochs 3 \
+        --epochs 30 \
         --layer_decay 0.65 \
         --drop_path 0.1 \
         --dist_eval \
