@@ -100,9 +100,12 @@ def get_args():
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
                         help='')
+    parser.add_argument('--dataset-config-path', type=str,
+                        help='path to dataset config')
     parser.set_defaults(pin_mem=True)
     
     # distributed training parameters
+    parser.add_argument('--distributed', action='store_true')
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
@@ -146,27 +149,21 @@ def main(args):
 
     # get dataset
     # datasets with the same montage can be packed within a sublist
-    datasets_train = [
-        ["path/to/dataset1", "path/to/dataset2"], # e.g., 64 channels for dataset1 and dataset2
-        ["path/to/dataset3", "path/to/dataset4"], # e.g., 32 channels for dataset3 and dataset4
-    ]
+    with open(args.dataset_config_path, 'r') as f:
+        dataset_config = json.load(f)
+    datasets_train = dataset_config['datasets_train']
     # time window for each sublist in dataset_train
     # to ensure the total sequence length be around 256 for each dataset
-    time_window = [
-        4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
-        8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
-    ]
+    time_window = dataset_config['train_time_window']
     dataset_train_list, train_ch_names_list = utils.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
 
-    datasets_val = [
-        ["path/to/datasets_val"]
-    ]
+    datasets_val = dataset_config['datasets_val']
     if args.disable_eval:
         dataset_val_list = None
     else:
         dataset_val_list, val_ch_names_list = utils.build_pretraining_dataset(datasets_val, [4])
 
-    if True:  # args.distributed:
+    if args.distributed:
         num_tasks = utils.get_world_size()
         global_rank = utils.get_rank()
         sampler_rank = global_rank
@@ -195,14 +192,17 @@ def main(args):
                 sampler_val = torch.utils.data.SequentialSampler(dataset)
                 sampler_eval_list.append(sampler_val)
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
-        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        sampler_train_list = [torch.utils.data.RandomSampler(dataset) for dataset in dataset_train_list]
+        sampler_eval_list = [torch.utils.data.SequentialSampler(dataset) for dataset in dataset_val_list]
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
+
+    if torch.dist.is_initialized():
+        torch.distributed.barrier()
 
     data_loader_train_list = []
     for dataset, sampler in zip(dataset_train_list, sampler_train_list):
@@ -258,7 +258,7 @@ def main(args):
     loss_scaler = NativeScaler()
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
     print("Use step level LR & WD scheduler!")
@@ -269,15 +269,15 @@ def main(args):
 
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-            
+
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device, log_writer, 0, args=args)
         exit(0)
-        
+
     if args.calculate_codebook_usage:
         test_stats = calculate_codebook_usage(data_loader_val, model, device, log_writer, 0, args=args)
         exit(0)
-        
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
             
@@ -288,13 +288,13 @@ def main(args):
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch)
         train_stats = train_one_epoch(
-            model, 
+            model,
             data_loader_train_list,
-            optimizer, 
-            device, 
-            epoch, 
+            optimizer,
+            device,
+            epoch,
             loss_scaler,
-            args.clip_grad, 
+            args.clip_grad,
             log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values,
@@ -306,14 +306,14 @@ def main(args):
             utils.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_ckpt_freq=args.save_ckpt_freq)
-        
+
         if data_loader_val_list is not None:
             test_stats = evaluate(data_loader_val_list, model, device, log_writer, epoch, ch_names_list=val_ch_names_list, args=args)
             print(f"Validation loss of the network on the {sum([len(dataset) for dataset in dataset_val_list])} test EEG: {test_stats['loss']:.4f}")
 
             if log_writer is not None:
                 log_writer.update(**test_stats, head="val/loss")
-                
+
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch, 'n_parameters': n_learnable_parameters}
