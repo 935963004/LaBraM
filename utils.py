@@ -38,6 +38,7 @@ from sklearn.metrics import r2_score
 from sklearn.metrics import mean_squared_error
 from scipy.stats import pearsonr
 
+from data_processor.dataset_new import EDFDataset
 
 standard_1020 = [
     'FP1', 'FPZ', 'FP2', 
@@ -704,7 +705,8 @@ def build_pretraining_dataset(datasets: list, time_window: list, stride_size=200
     shock_dataset_list = []
     ch_names_list = []
     for dataset_list, window_size in zip(datasets, time_window):
-        dataset = ShockDataset([Path(file_path) for file_path in dataset_list], window_size * 200, stride_size, start_percentage, end_percentage)
+        # dataset = ShockDataset([Path(file_path) for file_path in dataset_list], window_size * 200, stride_size, start_percentage, end_percentage)
+        dataset = EDFDataset([Path(file_path) for file_path in dataset_list], time_window * 2.0)
         shock_dataset_list.append(dataset)
         ch_names_list.append(dataset.get_ch_names())
     return shock_dataset_list, ch_names_list

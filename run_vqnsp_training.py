@@ -77,7 +77,7 @@ def get_args():
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
                         help='path where to tensorboard log')
-    
+
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -89,8 +89,9 @@ def get_args():
     parser.add_argument('--dist_eval', action='store_true', default=True,
                         help='Enabling distributed evaluation')
     parser.add_argument('--disable_eval', action='store_true', default=False)
-    
+
     parser.add_argument('--eval', action='store_true', default=False, help="Perform evaluation only")
+    parser.add_argument('--pretrained-weight', type=str, default=None, help="Path to pretrained weights")
     parser.add_argument('--calculate_codebook_usage', action='store_true', default=False)
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
@@ -103,7 +104,7 @@ def get_args():
     parser.add_argument('--dataset-config-path', type=str,
                         help='path to dataset config')
     parser.set_defaults(pin_mem=True)
-    
+
     # distributed training parameters
     parser.add_argument('--distributed', action='store_true')
     parser.add_argument('--world_size', default=1, type=int,
@@ -116,11 +117,12 @@ def get_args():
 
 
 def get_model(args, **kwargs):
-       
+
     model = create_model(
         args.model,
-        pretrained=False,
-        as_tokenzer=False,
+        pretrained=args.eval,
+        pretrained_weight=args.pretrained_weight,
+        as_tokenzer=args.eval,
         n_code=args.codebook_n_emd,
         code_dim=args.codebook_emd_dim,
         EEG_size=args.input_size,
@@ -271,11 +273,13 @@ def main(args):
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
-        test_stats = evaluate(data_loader_val, model, device, log_writer, 0, args=args)
+        test_stats = evaluate(data_loader_val_list, model, device, log_writer, 0, args=args)
+        log_writer.update(**test_stats, head="val/loss")
+        log_writer.flush()
         exit(0)
 
     if args.calculate_codebook_usage:
-        test_stats = calculate_codebook_usage(data_loader_val, model, device, log_writer, 0, args=args)
+        test_stats = calculate_codebook_usage(data_loader_val_list, model, device, log_writer, 0, args=args)
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
