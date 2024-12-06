@@ -45,6 +45,7 @@ class SingleEDFDataset(Dataset):
     def _load_and_preprocess(self):
         """Load the EDF file and preprocess into windows."""
         try:
+            print(self.file_path)
             raw = read_raw_edf(self.file_path, preload=True)
 
             raw.rename_channels({ch_name: ch_name.split('-')[0][:3] for ch_name in raw.ch_names if
@@ -220,7 +221,7 @@ class EDFDataset(Dataset):
         """
         self.datasets = [
             SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
-            for file_path in file_paths
+            for file_path in file_paths if str(file_path) != '.' or str(file_path) != '..'
         ]
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
