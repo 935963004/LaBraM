@@ -26,17 +26,11 @@ import argparse
 import torch
 import torch.distributed as dist
 from torch import inf
-import h5py
 
 from tensorboardX import SummaryWriter
-from data_processor.dataset import ShockDataset
 import pickle
 from scipy.signal import resample
 from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
-import pandas as pd
-from sklearn.metrics import r2_score
-from sklearn.metrics import mean_squared_error
-from scipy.stats import pearsonr
 
 from data_processor.dataset_new import EDFDataset
 
