@@ -700,7 +700,7 @@ def build_pretraining_dataset(datasets: list, time_window: list, stride_size=200
     ch_names_list = []
     for dataset_list, window_size in zip(datasets, time_window):
         # dataset = ShockDataset([Path(file_path) for file_path in dataset_list], window_size * 200, stride_size, start_percentage, end_percentage)
-        dataset = EDFDataset([Path(file_path) for file_path in dataset_list], time_window * 2.0)
+        dataset = EDFDataset([Path(file_path) for file_path in dataset_list], window_size * 2.0)
         shock_dataset_list.append(dataset)
         ch_names_list.append(dataset.get_ch_names())
     return shock_dataset_list, ch_names_list
