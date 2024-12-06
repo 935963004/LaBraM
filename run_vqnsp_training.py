@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 from timm.models import create_model
-from optim_factory import create_optimizer
+# from optim_factory import create_optimizer
 
 from engine_for_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
 from utils import NativeScalerWithGradNormCount as NativeScaler
@@ -265,6 +265,9 @@ def main(args):
     print("Batch size = %d" % total_batch_size)
     print("Number of training steps = %d" % num_training_steps_per_epoch)
     print("Number of training examples per epoch = %d" % (total_batch_size * num_training_steps_per_epoch))
+
+    def create_optimizer(_, model):
+        return torch.optim.AdamW(model.parameters())
 
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
