@@ -222,7 +222,7 @@ class EDFDataset(Dataset):
         print('Got paths:', file_paths)
         self.datasets = [
             SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
-            for file_path in file_paths
+            for file_path in file_paths.iterdir()
         ]
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
