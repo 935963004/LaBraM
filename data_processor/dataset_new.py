@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import random
 import torch
@@ -220,10 +222,12 @@ class EDFDataset(Dataset):
         - mask_percentage (float): Percentage of time to mask in the windows.
         """
         print('Got paths:', file_paths)
-        self.datasets = [
-            SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
-            for file_path in file_paths.iterdir()
-        ]
+        self.datasets = []
+        for directories in file_paths:
+            self.datasets.extend([
+                SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
+                for file_path in Path(directories).iterdir()
+            ])
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
         self.__feature_size = self.__datasets[0].feature_size
