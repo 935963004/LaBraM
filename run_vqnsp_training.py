@@ -242,6 +242,16 @@ def main(args):
         print(f'number of learnable params in model.{part}: {n_learnable_parameters / 1e6} M')
         print(f'number of fixed params in model.{part}: {n_fix_parameters / 1e6} M')
 
+    if args.eval:
+        test_stats = evaluate(data_loader_val_list, model, device, log_writer, 0, args=args)
+        log_writer.update(**test_stats, head="val/loss")
+        log_writer.flush()
+        exit(0)
+
+    if args.calculate_codebook_usage:
+        test_stats = calculate_codebook_usage(data_loader_val_list, model, device, log_writer, 0, args=args)
+        exit(0)
+
     n_learnable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_fix_parameters = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     print(f'total number of learnable params: {n_learnable_parameters / 1e6} M')
@@ -271,16 +281,6 @@ def main(args):
 
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-
-    if args.eval:
-        test_stats = evaluate(data_loader_val_list, model, device, log_writer, 0, args=args)
-        log_writer.update(**test_stats, head="val/loss")
-        log_writer.flush()
-        exit(0)
-
-    if args.calculate_codebook_usage:
-        test_stats = calculate_codebook_usage(data_loader_val_list, model, device, log_writer, 0, args=args)
-        exit(0)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
