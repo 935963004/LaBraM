@@ -219,9 +219,10 @@ class EDFDataset(Dataset):
         - threshold_std (float): Threshold for clipping based on standard deviation.
         - mask_percentage (float): Percentage of time to mask in the windows.
         """
+        print('Got paths:', file_paths)
         self.datasets = [
             SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
-            for file_path in file_paths if str(file_path) != '.' or str(file_path) != '..'
+            for file_path in file_paths
         ]
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
