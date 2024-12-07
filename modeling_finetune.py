@@ -360,7 +360,8 @@ class NeuralTransformer(nn.Module):
         print('input_time_window:', input_time_window)
         print('batch_size:', batch_size)
         print(n, t, self.patch_size, a)
-        print('time_embed', self.time_embed.shape)
+        print('time_embed:', self.time_embed.shape)
+        print('x:', x.shape)
         pos_embed_used = self.pos_embed[:, input_chans] if input_chans is not None else self.pos_embed
         if self.pos_embed is not None:
             pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(batch_size, -1, input_time_window, -1).flatten(1, 2)
