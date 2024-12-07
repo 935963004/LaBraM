@@ -347,7 +347,6 @@ class NeuralTransformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
-        print('input x:', x.shape)
         batch_size, n, a, t = x.shape
         input_time_window = a if t == self.patch_size else t
         x = self.patch_embed(x)
@@ -356,13 +355,6 @@ class NeuralTransformer(nn.Module):
 
         x = torch.cat((cls_tokens, x), dim=1)
 
-        print('input_chans:', input_chans)
-        print('pos_embed:', self.pos_embed.shape)
-        print('input_time_window:', input_time_window)
-        print('batch_size:', batch_size)
-        print(n, t, self.patch_size, a)
-        print('time_embed:', self.time_embed.shape)
-        print('x:', x.shape)
         pos_embed_used = self.pos_embed[:, input_chans] if input_chans is not None else self.pos_embed
         if self.pos_embed is not None:
             pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(batch_size, -1, input_time_window, -1).flatten(1, 2)
