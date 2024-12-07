@@ -135,7 +135,7 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
     # switch to evaluation mode
     model.eval()
 
-    if hasattr(model.module, 'quantize'):
+    if hasattr(model, 'module') and hasattr(model.module, 'quantize'):
         try:
             model.module.quantize.reset_cluster_size(device)
             print("Reset the codebook statistic info in quantizer before testing")
