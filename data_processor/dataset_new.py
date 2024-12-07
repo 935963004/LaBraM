@@ -40,7 +40,7 @@ class SingleEDFDataset(Dataset):
 
         # fixed list of "important" channels:
         self.important_channels = ['O2', 'O1', 'C3', 'C4', 'P3', 'P4', 'T4', 'T3', 'Fp2', 'Fp1', 'F3', 'F4', 'Cz', 'Fz',
-                                   'F8', 'T6', 'F7', 'T5', 'Pz']  # 19
+                                   'F8', 'T6'] #, 'F7', 'T5', 'Pz']  # 19
 
         self._load_and_preprocess()
 
@@ -61,11 +61,11 @@ class SingleEDFDataset(Dataset):
 
             # Preprocess data
             raw.filter(0.5, 40)
-            raw.resample(256)
+            raw.resample(200)
 
             self.sfreq = raw.info['sfreq']
             self.channel_names = raw.ch_names
-            self.original_data = raw.get_data()
+            self.original_data = raw.get_data(units='uV')
 
             data_array = self.original_data.copy()  # work on a copy of the original data
             mean = np.mean(data_array)

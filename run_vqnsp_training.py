@@ -163,7 +163,7 @@ def main(args):
     if args.disable_eval:
         dataset_val_list, val_ch_names_list = None, None
     else:
-        dataset_val_list, val_ch_names_list = utils.build_pretraining_dataset(datasets_val, [4])
+        dataset_val_list, val_ch_names_list = utils.build_pretraining_dataset(datasets_val, [16])
 
     if args.distributed:
         num_tasks = utils.get_world_size()
