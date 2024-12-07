@@ -141,7 +141,8 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
             print("Reset the codebook statistic info in quantizer before testing")
         except:
             pass
-    
+    print(data_loader_list)
+    print(ch_names_list)
     for data_loader, ch_names in zip(data_loader_list, ch_names_list):
         input_chans = utils.get_input_chans(ch_names)
         for step, (batch) in enumerate(metric_logger.log_every(data_loader, 10, header)):
