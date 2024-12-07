@@ -228,7 +228,6 @@ class EDFDataset(Dataset):
                 self.datasets.append(SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage))
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
-        self.__feature_size = self.__datasets[0].feature_size
 
     @property
     def feature_size(self):
