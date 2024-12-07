@@ -248,4 +248,4 @@ class EDFDataset(Dataset):
         pass
 
     def get_ch_names(self):
-        return self.__datasets[0].get_ch_names()
+        return self.datasets[0].get_ch_names()
