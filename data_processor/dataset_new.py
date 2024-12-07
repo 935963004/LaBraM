@@ -47,7 +47,6 @@ class SingleEDFDataset(Dataset):
     def _load_and_preprocess(self):
         """Load the EDF file and preprocess into windows."""
         try:
-            print(self.file_path)
             raw = read_raw_edf(self.file_path, preload=True)
 
             raw.rename_channels({ch_name: ch_name.split('-')[0][:3] for ch_name in raw.ch_names if
@@ -221,13 +220,12 @@ class EDFDataset(Dataset):
         - threshold_std (float): Threshold for clipping based on standard deviation.
         - mask_percentage (float): Percentage of time to mask in the windows.
         """
-        print('Got paths:', file_paths)
         self.datasets = []
         for directories in file_paths:
-            self.datasets.extend([
-                SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
-                for file_path in Path(directories).iterdir()
-            ])
+            it = iter(Path(directories).iterdir())
+            for i in range(10):
+                file_path = next(it)
+                self.datasets.append(SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage))
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
         self.__feature_size = self.__datasets[0].feature_size
