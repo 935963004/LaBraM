@@ -161,7 +161,7 @@ def main(args):
 
     datasets_val = dataset_config['datasets_val']
     if args.disable_eval:
-        dataset_val_list = None
+        dataset_val_list, val_ch_names_list = None, None
     else:
         dataset_val_list, val_ch_names_list = utils.build_pretraining_dataset(datasets_val, [4])
 
@@ -244,7 +244,7 @@ def main(args):
         print(f'number of fixed params in model.{part}: {n_fix_parameters / 1e6} M')
 
     if args.eval:
-        test_stats = evaluate(data_loader_val_list, model, device, log_writer, 0, args=args)
+        test_stats = evaluate(data_loader_val_list, model, device, log_writer, 0, ch_names_list=val_ch_names_list, args=args)
         log_writer.update(**test_stats, head="val/loss")
         log_writer.flush()
         exit(0)
