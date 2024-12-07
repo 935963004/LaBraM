@@ -204,7 +204,7 @@ def main(args):
     else:
         log_writer = None
 
-    if torch.dist.is_initialized():
+    if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
     data_loader_train_list = []
