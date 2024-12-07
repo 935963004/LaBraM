@@ -151,7 +151,9 @@ class VQNSP(nn.Module):
         x: shape [B, N, T]
         """
 
+        print('vqnsp, input x', x.shape)
         x = rearrange(x, 'B N (A T) -> B N A T', T=200)
+        print('vqnsp, x rearrange', x.shape)
         x_fft = torch.fft.fft(x, dim=-1)
         amplitude = torch.abs(x_fft)
         amplitude = self.std_norm(amplitude)
