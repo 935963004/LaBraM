@@ -105,7 +105,7 @@ class SingleEDFDataset(Dataset):
         return window
 
     def get_ch_names(self):
-        return self.important_channels
+        return [x.upper() for x in self.important_channels]
 
     @property
     def feature_size(self):
