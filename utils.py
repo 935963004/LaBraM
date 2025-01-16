@@ -30,7 +30,7 @@ from torch import inf
 from tensorboardX import SummaryWriter
 import pickle
 from scipy.signal import resample
-# from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
+from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
 
 from data_processor.dataset_new import EDFDataset
 

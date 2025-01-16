@@ -1,0 +1,18 @@
+Lmod has detected the following error: The following module(s) are unknown:
+"cuda/11.8"
+
+Please check the spelling or version number. Also try "module spider ..."
+It is also possible your cache file is out-of-date; it may help to try:
+  $ module --ignore-cache load "cuda/11.8"
+
+Also make sure that all modulefiles written in TCL start with the string
+#%Module
+
+
+
+Traceback (most recent call last):
+  File "/home/dmedvedeva/zarinamaks/LaBraM/_run_class_finetuning_on_tuab_with_triplet_loss.py", line 3, in <module>
+    import torch
+  File "/home/dmedvedeva/.local/lib/python3.10/site-packages/torch/__init__.py", line 367, in <module>
+    from torch._C import *  # noqa: F403
+ImportError: /home/dmedvedeva/.local/lib/python3.10/site-packages/torch/lib/../../nvidia/cusparse/lib/libcusparse.so.12: symbol __nvJitLinkComplete_12_4, version libnvJitLink.so.12 not defined in file libnvJitLink.so.12 with link time reference

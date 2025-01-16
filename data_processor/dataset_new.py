@@ -11,6 +11,23 @@ from mne.viz import plot_topomap
 from mne.channels import make_standard_montage
 from mne import create_info
 
+standard_1020 = [
+    'FP1', 'FPZ', 'FP2', 
+    'AF9', 'AF7', 'AF5', 'AF3', 'AF1', 'AFZ', 'AF2', 'AF4', 'AF6', 'AF8', 'AF10', \
+    'F9', 'F7', 'F5', 'F3', 'F1', 'FZ', 'F2', 'F4', 'F6', 'F8', 'F10', \
+    'FT9', 'FT7', 'FC5', 'FC3', 'FC1', 'FCZ', 'FC2', 'FC4', 'FC6', 'FT8', 'FT10', \
+    'T9', 'T7', 'C5', 'C3', 'C1', 'CZ', 'C2', 'C4', 'C6', 'T8', 'T10', \
+    'TP9', 'TP7', 'CP5', 'CP3', 'CP1', 'CPZ', 'CP2', 'CP4', 'CP6', 'TP8', 'TP10', \
+    'P9', 'P7', 'P5', 'P3', 'P1', 'PZ', 'P2', 'P4', 'P6', 'P8', 'P10', \
+    'PO9', 'PO7', 'PO5', 'PO3', 'PO1', 'POZ', 'PO2', 'PO4', 'PO6', 'PO8', 'PO10', \
+    'O1', 'OZ', 'O2', 'O9', 'CB1', 'CB2', \
+    'IZ', 'O10', 'T3', 'T5', 'T4', 'T6', 'M1', 'M2', 'A1', 'A2', \
+    'CFC1', 'CFC2', 'CFC3', 'CFC4', 'CFC5', 'CFC6', 'CFC7', 'CFC8', \
+    'CCP1', 'CCP2', 'CCP3', 'CCP4', 'CCP5', 'CCP6', 'CCP7', 'CCP8', \
+    'T1', 'T2', 'FTT9h', 'TTP7h', 'TPP9h', 'FTT10h', 'TPP8h', 'TPP10h', \
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1", "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
+]
+
 
 class SingleEDFDataset(Dataset):
     """Process a single EDF file and create a dataset."""
@@ -47,7 +64,7 @@ class SingleEDFDataset(Dataset):
     def _load_and_preprocess(self):
         """Load the EDF file and preprocess into windows."""
         try:
-            raw = read_raw_edf(self.file_path, preload=True)
+            raw = read_raw_edf(self.file_path, preload=True, verbose=False)
 
             raw.rename_channels({ch_name: ch_name.split('-')[0][:3] for ch_name in raw.ch_names if
                                  '-' in ch_name})  # захардкожено, надо будет переделать (3 з максимальная длина названия канала до спецификации на AA, Av и т.д.)
@@ -58,6 +75,17 @@ class SingleEDFDataset(Dataset):
                 raise ValueError("Not all required channels are present in the file.")
 
             raw.pick_channels(self.important_channels)  # select only the "important" channels
+
+            imp_ch_set = set([x.upper() for x in self.important_channels])
+            reordered_channels = []
+            for ch_name in standard_1020:
+                if ch_name in imp_ch_set:
+                    if ch_name == 'Fp2' or ch_name == 'Fp1':
+                        ch_name = 'Fp' + ch_name[2]
+                    elif ch_name == 'Cz' or ch_name == 'Fz':
+                        ch_name = ch_name[0] + 'z'
+                    reordered_channels.append(ch_name)
+            raw.reorder_channels(reordered_channels)
 
             # Preprocess data
             raw.filter(0.5, 40)
@@ -220,14 +248,28 @@ class EDFDataset(Dataset):
         - threshold_std (float): Threshold for clipping based on standard deviation.
         - mask_percentage (float): Percentage of time to mask in the windows.
         """
-        self.datasets = []
-        for directories in file_paths:
-            it = iter(Path(directories).iterdir())
-            for i in range(10):
-                file_path = next(it)
-                self.datasets.append(SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage))
+
+        ##########################
+        self.datasets = [
+            SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage)
+            for file_path in file_paths[:10]
+        ]
         self.dataset_lengths = [len(dataset) for dataset in self.datasets]
         self.total_length = sum(self.dataset_lengths)
+        ##########################
+        # zarina changed from this:
+        ##########################
+        # self.datasets = []
+        # for directories in file_paths:
+        #     it = iter(Path(directories).iterdir())
+        #     for i in range(10):
+        #         file_path = next(it)
+        #         print(file_path)
+        #         if str(file_path).endswith(".edf"):
+        #             self.datasets.append(SingleEDFDataset(file_path, window_size, step_size, threshold_std, mask_percentage))
+        # self.dataset_lengths = [len(dataset) for dataset in self.datasets]
+        # self.total_length = sum(self.dataset_lengths)
+        ##########################
 
     @property
     def feature_size(self):
@@ -248,3 +290,7 @@ class EDFDataset(Dataset):
 
     def get_ch_names(self):
         return self.datasets[0].get_ch_names()
+    
+    
+    
+    

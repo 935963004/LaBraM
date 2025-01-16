@@ -135,13 +135,32 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
 
         # replace the masked visual tokens by mask_token
         w = bool_masked_pos.unsqueeze(-1).type_as(mask_token)
+        
+        # if x is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: x shape = {x.shape}")
+        # if w is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: w shape = {w.shape}")
+        # if bool_masked_pos is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: mask_token shape = {mask_token.shape}")
+            
         x = x * (1 - w) + mask_token * w
 
         x = torch.cat((cls_tokens, x), dim=1)
         pos_embed_used = self.pos_embed[:, input_chans] if input_chans is not None else self.pos_embed
+        # if self.pos_embed is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: self.pos_embed shape = {self.pos_embed.shape}")
+
         if self.pos_embed is not None:
             pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(batch_size, -1, time_window, -1).flatten(1, 2)
+            # if pos_embed is not None:
+            #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: pos_embed shape AFTER 1st RESHAPE = {pos_embed.shape}")
             pos_embed = torch.cat((pos_embed[:,0:1,:].expand(batch_size, -1, -1), pos_embed), dim=1)
+            
+            # if x is not None:
+            #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: x shape = {x.shape}")
+            # if pos_embed is not None:
+            #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward_features: pos_embed shape = {pos_embed.shape}")
+            
             x = x + pos_embed
         if self.time_embed is not None:
             time_embed = self.time_embed[:, 0:time_window, :].unsqueeze(1).expand(batch_size, c, -1, -1).flatten(1, 2)
@@ -155,6 +174,14 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
         return self.norm(x)
 
     def forward(self, x, input_chans=None, bool_masked_pos=None, return_all_tokens=False, return_patch_tokens=False, return_all_patch_tokens=False):
+        
+        # if x is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward: x shape = {x.shape}")
+        # if input_chans is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward: input_chans = {input_chans}")
+        # if bool_masked_pos is not None:
+        #     print(f"At NeuralTransformerForMaskedEEGModeling (in modeling_pretrain.py) forward:, bool_masked_pos shape = {bool_masked_pos.shape}")
+            
         if bool_masked_pos is None:
             bool_masked_pos = torch.zeros((x.shape[0], x.shape[1] * x.shape[2]), dtype=torch.bool).to(x.device)
         x = self.forward_features(x, input_chans=input_chans, bool_masked_pos=bool_masked_pos)
@@ -255,6 +282,11 @@ class NeuralTransformerForMEM(nn.Module):
         return {'student.cls_token', 'student.pos_embed', 'student.time_embed'}
     
     def forward(self, x, input_chans=None, bool_masked_pos=None):
+        # print(f"At NeuralTransformerForMEM (in modeling_pretrain.py) forward: x shape = {x.shape}")
+        # if input_chans is not None:
+        #     print(f"At NeuralTransformerForMEM (in modeling_pretrain.py) forward: input_chans = {input_chans}")
+        # if bool_masked_pos is not None:
+        #     print(f"At NeuralTransformerForMEM (in modeling_pretrain.py) forward:, bool_masked_pos shape = {bool_masked_pos.shape}")
         x_masked = self.student(x, input_chans, bool_masked_pos, return_all_patch_tokens=True)
         x_masked_no_cls = x_masked[:, 1:]
         x_rec = self.lm_head(x_masked_no_cls[bool_masked_pos])

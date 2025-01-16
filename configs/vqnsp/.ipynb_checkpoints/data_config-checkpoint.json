@@ -1,0 +1,13 @@
+{
+    "datasets_train": [
+        ["path/to/dataset1", "path/to/dataset2"],
+        ["path/to/dataset3", "path/to/dataset4"]
+    ],
+    "train_time_window": [
+        4,
+        6
+    ],
+    "datasets_val": [
+        ["path/to/datasets_val"]
+    ]
+}
