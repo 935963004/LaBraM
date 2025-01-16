@@ -1,39 +1,36 @@
-# --------------------------------------------------------
-# Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI
-# By Wei-Bang Jiang
-# Based on BEiT-v2, timm, DeiT, and DINO code bases
-# https://github.com/microsoft/unilm/tree/master/beitv2
-# https://github.com/rwightman/pytorch-image-models/tree/master/timm
-# https://github.com/facebookresearch/deit/
-# https://github.com/facebookresearch/dino
-# ---------------------------------------------------------
-
-import argparse
-import datetime
-from pyexpat import model
-import numpy as np
-import time
+import os
+import random
 import torch
 import torch.backends.cudnn as cudnn
-import json
-import os
-
+from torch.utils.data import Dataset, DataLoader
+from torch.nn import TripletMarginLoss
+import argparse
+import datetime
+import numpy as np
+import time
 from pathlib import Path
 from collections import OrderedDict
-from timm.data.mixup import Mixup
-from timm.models import create_model
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
-from timm.utils import ModelEma
-from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
 
-from engine_for_finetuning import train_one_epoch, evaluate
+from timm.models import create_model
+from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
+import modeling_finetune
+from engine_for_finetuning import train_one_epoch_with_triplet, evaluate
+from triplet_dataset import TUABTripletDataset
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
-from scipy import interpolate
-import modeling_finetune
+
+# python run_class_finetuning_on_tuab_with_triplet_loss.py --normal_path $NORMAL_PATH --abnormal_path $ABNORMAL_PATH --triplet_loss_weight 0.1 --output_dir ./checkpoints/finetune_tuab_triplet/ --log_dir ./log/finetune_tuab_triplet/ --model labram_base_patch200_200 --finetune ./checkpoints/labram-base.pth --weight_decay 0.05 --batch_size 64 --lr 5e-4 --update_freq 1 --warmup_epochs 3 --epochs 30 --layer_decay 0.65 --drop_path 0.1 --dist_eval --save_ckpt_freq 5 --disable_rel_pos_bias --abs_pos_emb --dataset TUAB --disable_qkv_bias --seed 0
 
 def get_args():
-    parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
+    parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification with Triplet Loss', add_help=False)
+    parser.add_argument('--normal_path', required=True, type=str, help='Path to normal EEG samples')
+    parser.add_argument('--abnormal_path', required=True, type=str, help='Path to abnormal EEG samples')
+    parser.add_argument('--val_normal_path', required=True, type=str, help='Path to normal validation EEG samples') 
+    parser.add_argument('--val_abnormal_path', required=True, type=str, help='Path to abnormal validation EEG samples') 
+    parser.add_argument('--test_normal_path', required=True, type=str, help='Path to normal test EEG samples') 
+    parser.add_argument('--test_abnormal_path', required=True, type=str, help='Path to abnormal test EEG samples') 
+    parser.add_argument('--triplet_loss_weight', type=float, default=0.1, help='Weight for triplet loss')
+
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=30, type=int)
     parser.add_argument('--update_freq', default=1, type=int)
@@ -209,25 +206,36 @@ def get_models(args):
 
     return model
 
-
 def get_dataset(args):
     if args.dataset == 'TUAB':
-        train_dataset, test_dataset, val_dataset = utils.prepare_TUAB_dataset("path/to/TUAB")
-        ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
+        ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', 
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
         args.nb_classes = 1
         metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy"]
+        
+        if args.normal_path and args.abnormal_path and args.val_normal_path and args.val_abnormal_path and args.test_normal_path and args.test_abnormal_path:
+            train_dataset = TUABTripletDataset(args.normal_path, args.abnormal_path)
+            val_dataset = TUABTripletDataset(args.val_normal_path, args.val_abnormal_path)
+            test_dataset = TUABTripletDataset(args.test_normal_path, args.test_abnormal_path)
+        else:
+            train_dataset, test_dataset, val_dataset = utils.prepare_TUAB_dataset("path/to/TUAB")
+        
+        print(f"Number of training samples: {len(train_dataset)}")
+        print(f"Number of validation samples: {len(val_dataset)}")
+        print(f"Number of test samples: {len(test_dataset)}")
+        
+        return train_dataset, test_dataset, val_dataset, ch_names, metrics
+    
     elif args.dataset == 'TUEV':
         train_dataset, test_dataset, val_dataset = utils.prepare_TUEV_dataset("path/to/TUEV")
-        ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
+        ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', 
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
         args.nb_classes = 6
         metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-    return train_dataset, test_dataset, val_dataset, ch_names, metrics
-
-
+        return train_dataset, test_dataset, val_dataset, ch_names, metrics
+    
 def main(args, ds_init):
     utils.init_distributed_mode(args)
 
@@ -245,10 +253,10 @@ def main(args, ds_init):
     # random.seed(seed)
 
     cudnn.benchmark = True
-
+    
     # dataset_train, dataset_test, dataset_val: follows the standard format of torch.utils.data.Dataset.
     # ch_names: list of strings, channel names of the dataset. It should be in capital letters.
-    # metrics: list of strings, the metrics you want to use. We utilize PyHealth to implement it.
+    # metrics: list of strings, the metrics you want to use. We utilize PyHealth to implement it.   
     dataset_train, dataset_test, dataset_val, ch_names, metrics = get_dataset(args)
 
     if args.disable_eval_during_finetuning:
@@ -323,7 +331,7 @@ def main(args, ds_init):
     else:
         data_loader_val = None
         data_loader_test = None
-
+        
     model = get_models(args)
 
     patch_size = model.patch_size
@@ -467,6 +475,7 @@ def main(args, ds_init):
         print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
         exit(0)
 
+    ##### содержательное начинается тут !!!
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
@@ -476,7 +485,8 @@ def main(args, ds_init):
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
-        train_stats = train_one_epoch(
+        # train_stats = train_one_epoch(
+        train_stats = train_one_epoch_with_triplet( ##### modified
             model, criterion, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad, model_ema,
             log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
@@ -556,8 +566,7 @@ def main(args, ds_init):
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
-
-
+    
 if __name__ == '__main__':
     opts, ds_init = get_args()
     if opts.output_dir:

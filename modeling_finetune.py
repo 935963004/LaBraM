@@ -395,7 +395,7 @@ class NeuralTransformer(nn.Module):
         For example, for an EEG sample of 4 seconds with 64 electrodes, x will be [batch size, 64, 4, 200]
         '''
         x = self.forward_features(x, input_chans=input_chans, return_patch_tokens=return_patch_tokens, return_all_tokens=return_all_tokens, **kwargs)
-        if return_embeddings:
+        if return_embeddings: ##### modified
             return x, self.head(x) ##### modified
         x = self.head(x)
         return x
