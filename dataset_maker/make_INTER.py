@@ -31,6 +31,7 @@ def process_inter_dataset():
     balanced = False
     long_sec = 10
     n_jobs = 16#16
+    is_save_intervals = False
 
     config_raw = {"eeg_file_suffix": ".fif",
                   "l_freq": 0.1,
@@ -73,6 +74,7 @@ def read_eeg_channels_from_raw_mne(file_path: Union[str, Path], eeg_channels=Non
     raw_data = mne.io.read_raw(file_path, preload=True)
     raw_data = raw_data.rename_channels(lambda x: x.upper())
     raw_data = raw_data.pick_channels(eeg_channels).reorder_channels(eeg_channels)
+
     return raw_data
 
 def read_duckdb(path) -> pd.DataFrame:
@@ -130,9 +132,15 @@ def process_eeg_files(file_paths: Iterable[Union[str,Path]],
         raw_array = raw_array.set_channel_types(channel_type_mapping,
                                                 on_unit_change="ignore",
                                                 verbose=False)
-        
-        eeg_array = raw_array.get_data(units=config["units"], picks=eeg_channels)
-        save_chunks_files = save_eeg_intervals(eeg_array, out_path, id_key, len_samples)
+
+
+        if config.get("save_intervals", False):
+            eeg_array = raw_array.get_data(units=config["units"], picks=eeg_channels)
+            save_chunks_files = save_eeg_intervals(eeg_array, out_path, id_key, len_samples)
+        else:
+            out_file = Path(out_path, id_key).with_suffix(".fif")
+            raw_array.save(out_file, overwrite=True)
+
         # if np.abs(eeg_array.shape[1] - len_seq_sec * config["sec_sample"]) > 1.0:
         #     raise ValueError(f"Raw array shape {eeg_array.shape[1] / config['sec_sample']} "
         #                      f"does not match expected length {len_seq_sec}")
