@@ -79,8 +79,13 @@ def get_args():
                         help='Type of classification head to use linear/MLP(3 layers) (default: "linear")')
 
     # tokenizer settings
+    parser.add_argument("--use_tokenizer", action="store_true", help="Use tokenizer or not.")
     parser.add_argument("--tokenizer_weight", type=str, help="Path to tokenizer weight")
     parser.add_argument("--tokenizer_model", type=str, default="vqnsp_encoder_base_decoder_3x200x12")
+
+    # Tokenizer parameters
+    parser.add_argument('--codebook_size', default=8192, type=int, help='number of codebook')
+    parser.add_argument('--codebook_dim', default=32, type=int, help='number of codebook')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -251,10 +256,11 @@ def get_dataset(args):
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif args.dataset == 'INTERNAL':
         args.nb_classes = 1 #3
-        is_normal_abnormal = True
-        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/EpilepticEEG_processed_10sec")
-        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/EpilepticEEG/epileptic_labels.csv")
-        label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+        is_normal_abnormal = False
+        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec")
+        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv")
+        # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+        label_names = ['is_control', 'is_lesion']
         ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
                  'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
         # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
@@ -419,6 +425,8 @@ def main(args, ds_init):
         utils.load_state_dict(transformer_model, checkpoint_model, prefix=args.model_prefix)
 
     transformer_model.to(device)
+    if vqnsp_model is not None:
+        vqnsp_model.to(device)
 
     model_ema = None
     if args.model_ema:
@@ -443,7 +451,9 @@ def main(args, ds_init):
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(dataset_train))
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
-
+    use_cls_token = args.use_cls
+    print("Use cls token = %s" % str(use_cls_token))
+    print("Use tokenizer: %s" % str(args.use_tokenizer))
     num_layers = model_without_ddp.get_num_layers()
     if args.layer_decay < 1.0:
         assigner = LayerDecayValueAssigner(list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)))
@@ -475,7 +485,7 @@ def main(args, ds_init):
             transformer_model = torch.nn.parallel.DistributedDataParallel(transformer_model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = transformer_model.module
 
-        blocks_filter = [f"blocks.{i}." for i in range(num_layers)]
+        blocks_filter = [f"blocks.{i}." for i in range(num_layers-1)]
         filter_opt =  ["cls_token", "embed"] + blocks_filter
         optimizer = create_optimizer(
             args, model_without_ddp,
@@ -540,12 +550,18 @@ def main(args, ds_init):
         print(f"Epoch {epoch} starting ...")
 
         train_stats = train_one_epoch(
-            transformer_model, criterion, data_loader_train, optimizer,
-            device, epoch, loss_scaler, args.clip_grad, model_ema,
-            log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
-            lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq, 
-            ch_names=ch_names, is_binary=args.nb_classes == 1
+            transformer_model, vqnsp_model, criterion, data_loader_train, optimizer,
+            device, epoch, loss_scaler, args.clip_grad,
+            transformer_model_ema=model_ema,
+            log_writer=log_writer,
+            start_steps=epoch * num_training_steps_per_epoch,
+            lr_schedule_values=lr_schedule_values,
+            wd_schedule_values=wd_schedule_values,
+            num_training_steps_per_epoch=num_training_steps_per_epoch,
+            update_freq=args.update_freq,
+            ch_names=ch_names,
+            is_binary=args.nb_classes == 1,
+            use_cls_token=use_cls_token
         )
         print(f"Epoch {epoch} training finished.")
         if args.output_dir and args.save_ckpt:
