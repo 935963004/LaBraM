@@ -6,6 +6,7 @@ import os
 import pickle
 from warnings import warn
 from sklearn.frozen.tests.test_frozen import regression_dataset
+from torch.utils.hipify.hipify_python import meta_data
 from tqdm import tqdm
 from functools import partial
 from multiprocessing import Pool
@@ -22,21 +23,32 @@ MIN_LEN_SEC = 200
 TBL_DB_NAME = "main.results"
 
 def process_inter_dataset():
-    input_path = "/home/leong/data/EEG/INTER_DATA/EpilepticEEG"
-    out_path = "/home/leong/data/EEG/INTER_DATA/EpilepticEEG_processed_10sec"
+    meta_data_path = "/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv"
+    input_path = "/home/leong/data/EEG/INTER_DATA/20K-EEG/"
+    out_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
+    labels = ["is_control", "is_lesion"]
+    n_samples = 1000
+    balanced = False
+    long_sec = 10
+    n_jobs = 16#16
 
     config_raw = {"eeg_file_suffix": ".fif",
                   "l_freq": 0.1,
                   "h_freq": 75.0,
-                  "sec_sample": 200,
+                    "sec_sample": 200,
                   "notch_filter_freq": 50.0,
-                  "len_seq_sec": 10,
-                  "n_jobs": 16,
+                  "len_seq_sec": long_sec,
+                  "meta_data_path": meta_data_path,
+                  "labels": labels,
+                  "n_jobs": n_jobs,
                   "resample_n_jobs": 1,
                   "units": 'uV'}
     process_all_to_fit(input_path, config_raw, out_path)
 
-def process_all_to_fit_files(db_path: str, config_raw: dict, out_path: str, jobs: int = 10):
+def process_all_to_fit_files(db_path: str,
+                             config_raw: dict,
+                             out_path: str,
+                             jobs: int = 10):
     pool = Pool(processes=jobs)
     pool.map(partial(process_duckdb_to_fit,
                      config_raw=config_raw,
@@ -154,6 +166,16 @@ def process_all_to_fit(input_path: str, config: Dict[str, Any], out_path: str):
     assert all(map(lambda x: x.is_file(), file_eeg_paths)), \
         f'Not all files are eeg files{pattern} in path: {input_path.name}'
 
+    # Filter relevant files:
+    if "labels" in config and len(config["labels"]) > 0:
+        meta_data_df = pd.read_csv(config["meta_data_path"])
+        labels = config["labels"]
+        if not set(labels) < set(meta_data_df.columns):
+            raise ValueError(f"Labels {labels} not found in meta data columns {meta_data_df.columns}")
+        file_names_labels = meta_data_df[meta_data_df[labels].any(axis=1)]["fif_filename_hashed"]
+        file_eeg_paths = list(filter(lambda x: x.name in list(file_names_labels), file_eeg_paths))
+        if len(file_eeg_paths) == 0:
+            raise ValueError(f"No files left after filtering by labels {labels}")
     n_jobs = config.get("n_jobs")
     if n_jobs > 1:
         with Pool(processes=n_jobs) as pool:
