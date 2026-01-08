@@ -11,7 +11,7 @@
 from cgitb import enable
 import math
 import sys
-from typing import Iterable
+from typing import Iterable, Optional
 
 import torch
 import torch.nn as nn
@@ -56,7 +56,7 @@ def random_masking(x, mask_ratio):
 
 
 def train_one_epoch(model: nn.Module,
-                    vqnsp: VQNSP,
+                    vqnsp: Optional[VQNSP],
                     data_loader_list: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     log_writer=None, lr_scheduler=None, start_steps=None,

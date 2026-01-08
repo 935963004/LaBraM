@@ -193,7 +193,7 @@ class NormEMAVectorQuantizer(nn.Module):
 
             norm_ema_inplace(self.embedding.weight, embed_normalized, self.decay)
 
-        # compute loss for embedding
+        # compute loss for embedding = 1 - cosine similarity between z_q and z_e
         loss = self.beta * F.mse_loss(z_q.detach(), z) 
         
         # preserve gradients
