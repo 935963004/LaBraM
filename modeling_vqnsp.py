@@ -7,9 +7,9 @@
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
 # ---------------------------------------------------------
-
+from typing import Iterable, Optional, List, Dict, Any
 import torch
-from torch import nn
+from torch import nn, Tensor
 import torch.nn.functional as F
 from functools import partial
 from einops import rearrange
@@ -63,12 +63,13 @@ class VQNSP(nn.Module):
             nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
             nn.Tanh(),
             nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
-        )
+        ) # magnitude prediction
+
         self.decode_task_layer_angle = nn.Sequential(
             nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
             nn.Tanh(),
             nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
-        )
+        ) # phase prediction
 
         self.kwargs = kwargs
         
@@ -99,37 +100,40 @@ class VQNSP(nn.Module):
     def get_number_of_tokens(self):
         return self.quantize.n_e
 
-    def get_tokens(self, data, input_chans=None, **kwargs):
-        quantize, embed_ind, loss = self.encode(data, input_chans=input_chans)
-        output = {}
-        output['token'] = embed_ind.view(data.shape[0], -1)
-        output['input_img'] = data
-        output['quantize'] = rearrange(quantize, 'b d a c -> b (a c) d')
-
+    def get_tokens(self, data, input_chans=None, **kwargs)-> Dict[str, torch.Tensor]:
+        quantize_tokens, codebook_ind, loss = self.encode(data, input_chans=input_chans)
+        output = {'token': codebook_ind.view(data.shape[0], -1),
+                  'input_img': data,
+                  'quantize': rearrange(quantize_tokens, 'b d a c -> b (a c) d'),
+                  'loss': loss}
         return output
 
     def encode(self, x, input_chans=None):
-        batch_size, n, a, t = x.shape
+        batch_size, n_channels, n_samples, times = x.shape
         encoder_features = self.encoder(x, input_chans, return_patch_tokens=True)
 
-        with torch.cuda.amp.autocast(enabled=False):
-            to_quantizer_features = self.encode_task_layer(encoder_features.type_as(self.encode_task_layer[-1].weight))
+        codebook_ind, loss, quantize_tokens = self.quantize_enc_features(encoder_features, n_channels)
 
-        N = to_quantizer_features.shape[1]
-        h, w = n, N // n
+        return quantize_tokens, codebook_ind, loss
 
-        to_quantizer_features = rearrange(to_quantizer_features, 'b (h w) c -> b c h w', h=h, w=w) # reshape for quantizer
-        quantize, loss, embed_ind = self.quantize(to_quantizer_features)
+    def quantize_enc_features(self, encoder_features: torch.Tensor, n_channels: int) -> tuple[Tensor, Tensor, Tensor]:
+        with torch.amp.autocast('cuda'):
+            quantizer_features = self.encode_task_layer(encoder_features.type_as(self.encode_task_layer[-1].weight))
 
-        return quantize, embed_ind, loss
-    
-    def decode(self, quantize, input_chans=None, **kwargs):
+        quantizer_ch = quantizer_features.shape[1] // n_channels
+
+        quantizer_features = rearrange(quantizer_features, 'b (h w) c -> b c h w', h=n_channels,
+                                       w=quantizer_ch)  # reshape for quantizer
+        quantize_tokens, quantize_loss, codebook_ind = self.quantize(quantizer_features)
+        return codebook_ind, quantize_loss, quantize_tokens
+
+    def decode(self, quantize, input_chans=None, **kwargs) -> tuple[Tensor, Tensor]:
         # reshape tokens to feature maps for patch embed in decoder
         # quantize = rearrange(quantize, 'b (h w) c -> b c h w', h=self.token_shape[0], w=self.token_shape[1])
         decoder_features = self.decoder(quantize, input_chans, return_patch_tokens=True)
-        rec = self.decode_task_layer(decoder_features)
-        rec_angle = self.decode_task_layer_angle(decoder_features)
-        return rec, rec_angle
+        recon_amplitude = self.decode_task_layer(decoder_features)
+        recon_angle = self.decode_task_layer_angle(decoder_features)
+        return recon_amplitude, recon_angle
     
     def get_codebook_indices(self, x, input_chans=None, **kwargs):
         # for LaBraM pre-training
@@ -152,27 +156,33 @@ class VQNSP(nn.Module):
         """
 
         x = rearrange(x, 'B N (A T) -> B N A T', T=200)
-        x_fft = torch.fft.fft(x, dim=-1)
-        amplitude = torch.abs(x_fft)
-        amplitude = self.std_norm(amplitude)
-        angle = torch.angle(x_fft)
-        angle = self.std_norm(angle)
 
-        quantize, embed_ind, emb_loss = self.encode(x, input_chans)
-        
-        xrec, xrec_angle = self.decode(quantize, input_chans)
-        rec_loss = self.calculate_rec_loss(xrec, amplitude)
-        rec_angle_loss = self.calculate_rec_loss(xrec_angle, angle)
-        loss = emb_loss + rec_loss + rec_angle_loss
+        quantize_tokens, quantize_ind, quantize_loss = self.encode(x, input_chans)
+
+        rec_amplitude_loss, rec_phase_loss = self.get_spectral_quantize_recon_losses(x, quantize_tokens, input_chans)
+
+        total_loss = quantize_loss + rec_amplitude_loss + rec_phase_loss
 
         log = {}
         split="train" if self.training else "val"
-        log[f'{split}/quant_loss'] = emb_loss.detach().mean()
-        log[f'{split}/rec_loss'] = rec_loss.detach().mean()
-        log[f'{split}/rec_angle_loss'] = rec_angle_loss.detach().mean()
-        log[f'{split}/total_loss'] = loss.detach().mean()
+        log[f'{split}/quant_loss'] = quantize_loss.detach().mean()
+        log[f'{split}/rec_loss'] = rec_amplitude_loss.detach().mean()
+        log[f'{split}/rec_angle_loss'] = rec_phase_loss.detach().mean()
+        log[f'{split}/total_loss'] = total_loss.detach().mean()
 
-        return loss, log
+        return total_loss, log
+
+    def get_spectral_quantize_recon_losses(self, x, quantize, input_chans) -> tuple[Tensor, Tensor]:
+        recon_amplitude, recon_phase = self.decode(quantize, input_chans)
+        x_fft = torch.fft.fft(x, dim=-1)
+        amplitude = torch.abs(x_fft)
+        amplitude = self.std_norm(amplitude)
+        phase = torch.angle(x_fft)
+        phase = self.std_norm(phase)
+        rec_amplitude_loss = self.calculate_rec_loss(recon_amplitude, amplitude)
+        rec_phase_loss = self.calculate_rec_loss(recon_phase, phase)
+        return rec_amplitude_loss, rec_phase_loss
+
 
 def get_model_default_params():
     return dict(EEG_size=1600, patch_size=200, in_chans=1, num_classes=1000, embed_dim=200, depth=12, num_heads=10,  
@@ -188,6 +198,7 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
     # encoder settings
     encoder_config['EEG_size'] = EEG_size
     encoder_config['num_classes'] = 0
+    # encoder_config['use_mean_pooling'] = False
     # decoder settings
     decoder_config['EEG_size'] = EEG_size // decoder_config['patch_size']
     decoder_config['patch_size'] = 1
@@ -202,11 +213,12 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
     if as_tokenzer:
         assert pretrained
         assert pretrained_weight is not None
-
+        model.encoder.use_mean_pooling = False # TODO: must be changed in config
+        model.decoder.use_mean_pooling = False # TODO: must be changed in config
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(pretrained_weight, map_location='cpu', check_hash=True)
         else:
-            weights = torch.load(pretrained_weight, map_location='cpu')
+            weights = torch.load(pretrained_weight, map_location='cpu', weights_only=False)
             
         if 'model' in weights:
             weights = weights['model']
@@ -229,6 +241,7 @@ def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=Non
     encoder_config['EEG_size'] = EEG_size
     encoder_config['num_classes'] = 0
     encoder_config['depth'] = 24
+    # encoder_config['use_mean_pooling'] = False
     # decoder settings
     decoder_config['EEG_size'] = EEG_size // decoder_config['patch_size']
     decoder_config['patch_size'] = 1
@@ -243,7 +256,8 @@ def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=Non
     if as_tokenzer:
         assert pretrained
         assert pretrained_weight is not None
-
+        model.encoder.use_mean_pooling = False # TODO: must be changed in config
+        model.decoder.use_mean_pooling = False # TODO: must be changed in config
         if pretrained_weight.startswith('https'):
             weights = torch.hub.load_state_dict_from_url(pretrained_weight, map_location='cpu', check_hash=True)
         else:
