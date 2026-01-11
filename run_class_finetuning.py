@@ -160,7 +160,7 @@ def get_args():
                         help='resume from checkpoint')
     parser.add_argument('--auto_resume', action='store_true')
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
-    parser.set_defaults(auto_resume=True)
+    parser.set_defaults(auto_resume=False)
 
     parser.add_argument('--save_ckpt', action='store_true')
     parser.add_argument('--no_save_ckpt', action='store_false', dest='save_ckpt')
@@ -421,6 +421,8 @@ def main(args, ds_init):
         for key in all_keys:
             if "relative_position_index" in key:
                 checkpoint_model.pop(key)
+        # redundant norm layer from legacy model
+        checkpoint_model = {k.replace(".fc_norm.", ".norm."): v for k, v in checkpoint_model.items()}
 
         utils.load_state_dict(transformer_model, checkpoint_model, prefix=args.model_prefix)
 
@@ -485,7 +487,7 @@ def main(args, ds_init):
             transformer_model = torch.nn.parallel.DistributedDataParallel(transformer_model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = transformer_model.module
 
-        blocks_filter = [f"blocks.{i}." for i in range(num_layers-1)]
+        blocks_filter = [f"blocks.{i}." for i in range(num_layers-2)]
         filter_opt =  ["cls_token", "embed"] + blocks_filter
         optimizer = create_optimizer(
             args, model_without_ddp,

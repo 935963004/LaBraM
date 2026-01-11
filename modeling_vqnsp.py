@@ -110,8 +110,8 @@ class VQNSP(nn.Module):
 
     def encode(self, x, input_chans=None):
         batch_size, n_channels, n_samples, times = x.shape
-        encoder_features = self.encoder(x, input_chans, return_patch_tokens=True)
-
+        encoder_out = self.encoder(x, input_chans)
+        encoder_features = encoder_out['patch_tokens']  # b, num_patches, embed_dim
         codebook_ind, loss, quantize_tokens = self.quantize_enc_features(encoder_features, n_channels)
 
         return quantize_tokens, codebook_ind, loss
@@ -130,7 +130,8 @@ class VQNSP(nn.Module):
     def decode(self, quantize, input_chans=None, **kwargs) -> tuple[Tensor, Tensor]:
         # reshape tokens to feature maps for patch embed in decoder
         # quantize = rearrange(quantize, 'b (h w) c -> b c h w', h=self.token_shape[0], w=self.token_shape[1])
-        decoder_features = self.decoder(quantize, input_chans, return_patch_tokens=True)
+        decoder_out = self.decoder(quantize, input_chans)
+        decoder_features = decoder_out['patch_tokens']
         recon_amplitude = self.decode_task_layer(decoder_features)
         recon_angle = self.decode_task_layer_angle(decoder_features)
         return recon_amplitude, recon_angle
@@ -229,6 +230,8 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
         for k in keys:
             if k.startswith("loss") or k.startswith("teacher") or k.startswith("scaling"):
                 del weights[k]
+
+        weights = {k.replace(".fc_norm.", ".norm."): v for k, v in weights.items()}
         model.load_state_dict(weights)
     return model
 
@@ -272,6 +275,9 @@ def vqnsp_encoder_large_decoder_3x200x24(pretrained=False, pretrained_weight=Non
         for k in keys:
             if k.startswith("loss") or k.startswith("teacher") or k.startswith("scaling"):
                 del weights[k]
+
+        weights = {k.replace(".fc_norm.", ".norm."): v for k, v in weights.items()}
+
         model.load_state_dict(weights)
     return model
 

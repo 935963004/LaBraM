@@ -28,25 +28,19 @@ def train_class_batch(pred_model: NeuralTransformer,
                       ch_names: List[str],
                       use_cls_token=False) -> tuple[Dict[str, Tensor], Tensor]:
     batch_size, n_channels, n_samples, times = samples.shape
-    encode_features = pred_model.forward_features(samples, ch_names,
-                                                  return_patch_tokens=True,
-                                                  return_all_tokens=True)
-    patch_features = encode_features[:, 1:]
-    cls_features = encode_features[:, 0]
-    if use_cls_token:
-        pred_class = pred_model.head(cls_features)
-    else:
-        pred_class = pred_model.head(patch_features.mean(1))
-        # raise NotImplementedError("Only support using cls token for now.")
+    out_pred = pred_model.forward(samples, ch_names)
+    patch_tokens = out_pred['patch_tokens']
+    pred_class = out_pred['pred_class']
+
     if vqnsp_model is not None:
-        codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_features, n_channels)
+        codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
+                                                                                         n_channels)
         rec_amplitude_loss, rec_phase_loss = vqnsp_model.get_spectral_quantize_recon_losses(samples, quantize_tokens, ch_names)
-    #one_hot_tensor = F.one_hot(codebook_ind, num_classes=vqnsp_model.quantize.num_tokens)
     else:
         quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
     loss_finetune_class = criterion(pred_class, target)
 
-    loss_total = loss_finetune_class + quantize_loss + rec_amplitude_loss + rec_phase_loss
+    loss_total = loss_finetune_class + quantize_loss + rec_amplitude_loss + 0.1*rec_phase_loss
     loss = {"loss_total": loss_total,
             "loss_finetune_class": loss_finetune_class,
             "quantize_loss": quantize_loss,
@@ -256,17 +250,17 @@ def evaluate(data_loader: torch.utils.data.DataLoader,
         
         # compute output
         with torch.amp.autocast(device_type=device.type):
-            output = model(EEG, input_chans=input_chans)
-            loss = criterion(output, target)
+            pred_class = model(EEG, input_chans=input_chans)['pred_class']
+            loss = criterion(pred_class, target)
         
         if is_binary:
-            output = torch.sigmoid(output).cpu()
+            pred_class = torch.sigmoid(pred_class).cpu()
         else:
-            output = output.cpu()
+            pred_class = pred_class.cpu()
         target = target.cpu()
 
-        results = utils.get_metrics(output.numpy(), target.numpy(), metrics, is_binary)
-        pred.append(output)
+        results = utils.get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
+        pred.append(pred_class)
         true.append(target)
 
         batch_size = EEG.shape[0]
