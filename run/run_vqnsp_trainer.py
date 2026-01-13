@@ -20,12 +20,15 @@ import os
 from pathlib import Path
 
 from timm.models import create_model
-from optim_factory import create_optimizer
 
-from engine_for_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
-from utils import NativeScalerWithGradNormCount as NativeScaler
-import modeling_vqnsp
-import utils
+from utils import dist_utils
+from data import eeg_datasets
+from models import models_io
+from train import optimizers, logers
+from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
+
+from train.train_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
+from models.vqnsp import VQNSP
 
 
 def get_args():
@@ -112,7 +115,7 @@ def get_args():
     return parser.parse_args()
 
 
-def get_model(args, **kwargs):
+def get_visual_tokenizer(args, **kwargs) -> VQNSP:
        
     model = create_model(
         args.model,
@@ -128,21 +131,21 @@ def get_model(args, **kwargs):
 
 
 def main(args):
-    utils.init_distributed_mode(args)
+    dist_utils.init_distributed_mode(args)
 
     print(args)
 
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
+    seed = args.seed + dist_utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
 
     cudnn.benchmark = True
 
-    model = get_model(args)
+    model = get_visual_tokenizer(args)
 
     # get dataset
     # datasets with the same montage can be packed within a sublist
@@ -156,7 +159,7 @@ def main(args):
         4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
         8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = utils.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
+    dataset_train_list, train_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
 
     datasets_val = [
         ["path/to/datasets_val"]
@@ -164,11 +167,11 @@ def main(args):
     if args.disable_eval:
         dataset_val_list = None
     else:
-        dataset_val_list, val_ch_names_list = utils.build_pretraining_dataset(datasets_val, [4])
+        dataset_val_list, val_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_val, [4])
 
     if True:  # args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
+        num_tasks = dist_utils.get_world_size()
+        global_rank = dist_utils.get_rank()
         sampler_rank = global_rank
         num_training_steps_per_epoch = sum([len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
 
@@ -200,7 +203,7 @@ def main(args):
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
+        log_writer = logers.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
 
@@ -245,7 +248,7 @@ def main(args):
     print(f'total number of learnable params: {n_learnable_parameters / 1e6} M')
     print(f'total number of fixed params in : {n_fix_parameters / 1e6} M')
 
-    total_batch_size = args.batch_size * utils.get_world_size()
+    total_batch_size = args.batch_size * dist_utils.get_world_size()
     args.lr = total_batch_size / 128 * args.lr
     print("LR = %.8f" % args.lr)
     print("Min LR = %.8f" % args.min_lr)
@@ -262,12 +265,12 @@ def main(args):
         model_without_ddp = model.module
 
     print("Use step level LR & WD scheduler!")
-    lr_schedule_values = utils.cosine_scheduler(
+    lr_schedule_values = optimizers.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
 
-    utils.auto_load_model(
+    models_io.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
             
     if args.eval:
@@ -303,7 +306,7 @@ def main(args):
         )
         if args.output_dir:
             # if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
-            utils.save_model(
+            models_io.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_ckpt_freq=args.save_ckpt_freq)
         
@@ -321,7 +324,7 @@ def main(args):
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         'epoch': epoch, 'n_parameters': n_learnable_parameters}
 
-        if args.output_dir and utils.is_main_process():
+        if args.output_dir and dist_utils.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:

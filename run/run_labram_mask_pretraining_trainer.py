@@ -16,17 +16,20 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-from typing import OrderedDict, Optional
+from typing import Optional
 from pathlib import Path
 
 from timm.models import create_model
-from optim_factory import create_optimizer
 
-from engine_for_pretraining import train_one_epoch
-from utils import NativeScalerWithGradNormCount as NativeScaler
-import utils
-# import modeling_pretrain
-from modeling_vqnsp import VQNSP
+from utils import dist_utils
+from data import eeg_datasets
+from models import models_io
+from train import optimizers, logers
+from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
+
+from train.train_mask_pretraining import train_one_epoch
+from models.vqnsp import VQNSP
+from models.mask_modeling import NeuralTransformerForMEM
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM pre-training script', add_help=False)
@@ -121,7 +124,7 @@ def get_args():
     return parser.parse_args()
 
 
-def get_model(args):
+def get_encoder_model(args)-> NeuralTransformerForMEM:
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -136,7 +139,7 @@ def get_model(args):
 
     return model
 
-def get_visual_tokenizer(args)-> Optional[VQNSP]:
+def get_vqnsp_model(args)-> Optional[VQNSP]:
     if args.use_tokenizer is False:
         print("No visual tokenizer is used!")
         return None
@@ -157,22 +160,22 @@ def get_visual_tokenizer(args)-> Optional[VQNSP]:
     return model
 
 def main(args):
-    utils.init_distributed_mode(args)
+    dist_utils.init_distributed_mode(args)
 
     print(args)
 
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
+    seed = args.seed + dist_utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
 
     cudnn.benchmark = True
 
-    model = get_model(args)
-    patch_size = model.patch_size
+    encoder_model = get_encoder_model(args)
+    patch_size = encoder_model.patch_size
     print("Patch size = %s" % str(patch_size))
     args.window_size = (1, args.input_size // patch_size)
     args.patch_size = patch_size
@@ -189,13 +192,13 @@ def main(args):
         4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
         8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = utils.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
+    dataset_train_list, train_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
     # prepare visual tokenizer
-    vqnsp = get_visual_tokenizer(args).to(device)
+    vqnsp = get_vqnsp_model(args).to(device)
 
     if True:  # args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
+        num_tasks = dist_utils.get_world_size()
+        global_rank = dist_utils.get_rank()
         sampler_rank = global_rank
         num_training_steps_per_epoch = sum([len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
 
@@ -211,7 +214,7 @@ def main(args):
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
+        log_writer = logers.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
 
@@ -226,41 +229,41 @@ def main(args):
         )
         data_loader_train_list.append(data_loader_train)
 
-    model.to(device)
-    model_without_ddp = model
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    encoder_model.to(device)
+    model_without_ddp = encoder_model
+    n_parameters = sum(p.numel() for p in encoder_model.parameters() if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
 
     print("Tokenizer = %s" % str(vqnsp))
-    total_batch_size = args.batch_size * utils.get_world_size() * args.gradient_accumulation_steps
+    total_batch_size = args.batch_size * dist_utils.get_world_size() * args.gradient_accumulation_steps
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
     print("Number of training steps = %d" % num_training_steps_per_epoch)
     print("Number of training examples per epoch = %d" % (total_batch_size * num_training_steps_per_epoch))
 
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-        model_without_ddp = model.module
+        encoder_model = torch.nn.parallel.DistributedDataParallel(encoder_model, device_ids=[args.gpu], find_unused_parameters=True)
+        model_without_ddp = encoder_model.module
 
     optimizer = create_optimizer(
         args, model_without_ddp)
     loss_scaler = NativeScaler()
 
     print("Use step level LR & WD scheduler!")
-    lr_schedule_values = utils.cosine_scheduler(
+    lr_schedule_values = optimizers.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
     if args.weight_decay_end is None:
         args.weight_decay_end = args.weight_decay
-    wd_schedule_values = utils.cosine_scheduler(
+    wd_schedule_values = optimizers.cosine_scheduler(
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
-    utils.auto_load_model(
-        args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    models_io.auto_load_model(
+        args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
@@ -272,7 +275,7 @@ def main(args):
             log_writer.set_step(epoch * num_training_steps_per_epoch)
 
         train_stats = train_one_epoch(
-            model, vqnsp, data_loader_train_list,
+            encoder_model, vqnsp, data_loader_train_list,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
@@ -282,14 +285,14 @@ def main(args):
             args=args,
         )
         if args.output_dir:
-            utils.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+            models_io.save_model(
+                args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_ckpt_freq=args.save_ckpt_freq)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch, 'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
+        if args.output_dir and dist_utils.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:

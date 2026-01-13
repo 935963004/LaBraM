@@ -10,30 +10,30 @@
 
 import argparse
 import datetime
-from pyexpat import model
 import numpy as np
 import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-
 from pathlib import Path
 from collections import OrderedDict
-# from timm.data.mixup import Mixup
 from timm.models import create_model
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import ModelEma
-from torch.cuda import use_mem_pool
 
-from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
+from utils import dist_utils
+from data import eeg_datasets
+from models import models_io
+from train import optimizers, logers
+from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayValueAssigner, \
+    NativeScalerWithGradNormCount as NativeScaler
 
-from engine_for_finetuning import train_one_epoch, evaluate
-from utils import NativeScalerWithGradNormCount as NativeScaler
-import utils
-from scipy import interpolate
-from run_labram_pretraining import get_visual_tokenizer
-from modeling_finetune import NeuralTransformer
+from train.train_finetuning_classifier import train_one_epoch, evaluate_classifier
+
+from run_vqnsp_trainer import get_visual_tokenizer
+from models.neural_transformer import NeuralTransformer
+
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -209,7 +209,7 @@ def get_args():
 
     return parser.parse_args(), ds_init
 
-def get_models(args) ->NeuralTransformer:
+def get_encoder_models(args) ->NeuralTransformer:
     use_mem_pooling = args.use_mean_pooling if not args.use_cls else False
     model = create_model(
         args.model,
@@ -234,14 +234,14 @@ def get_models(args) ->NeuralTransformer:
 def get_dataset(args):
     if args.dataset == 'TUAB':
         dataset_dir = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
-        train_dataset, test_dataset, val_dataset = utils.prepare_TUAB_dataset(dataset_dir)
+        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_TUAB_dataset(dataset_dir)
         ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
         args.nb_classes = 1
         metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy"]
     elif args.dataset == 'TUEV':
-        train_dataset, test_dataset, val_dataset = utils.prepare_TUEV_dataset("path/to/TUEV")
+        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_TUEV_dataset("path/to/TUEV")
         ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
@@ -252,7 +252,7 @@ def get_dataset(args):
         args.nb_classes = 5
         metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
         dataset_dir = Path("/Users/leon/Data/neurolm_downstream", 'HMC')
-        train_dataset, test_dataset, val_dataset = utils.prepare_HMC_dataset(dataset_dir)
+        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_HMC_dataset(dataset_dir)
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif args.dataset == 'INTERNAL':
         args.nb_classes = 1 #3
@@ -271,11 +271,11 @@ def get_dataset(args):
         # - recall: recall
         # score
         metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy", "f1", "recall", "precision"] # binary classification
-        train_dataset, test_dataset, val_dataset = utils.prepare_internal_dataset(root_path=dataset_dir,
-                                                                                  seed=args.seed,
-                                                                                  is_normal_abnormal=is_normal_abnormal,
-                                                                                  class_labels=label_names,
-                                                                                  metadata_csv_path=metadata_path)
+        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_internal_dataset(root_path=dataset_dir,
+                                                                                         seed=args.seed,
+                                                                                         is_normal_abnormal=is_normal_abnormal,
+                                                                                         class_labels=label_names,
+                                                                                         metadata_csv_path=metadata_path)
     else:
         raise ValueError("Unknown dataset: %s" % args.dataset)
 
@@ -283,16 +283,16 @@ def get_dataset(args):
 
 
 def main(args, ds_init):
-    utils.init_distributed_mode(args)
+    dist_utils.init_distributed_mode(args)
 
     if ds_init is not None:
-        utils.create_ds_config(args)
+        dist_utils.create_ds_config(args)
 
     print(args)
 
     device = torch.device(args.device) if torch.cuda.is_available() else torch.device('cpu')
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
+    seed = args.seed + dist_utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
@@ -309,8 +309,8 @@ def main(args, ds_init):
         dataset_test = None
 
     if True:  # args.distributed:
-        num_tasks = utils.get_world_size()
-        global_rank = utils.get_rank()
+        num_tasks = dist_utils.get_world_size()
+        global_rank = dist_utils.get_rank()
         sampler_train = torch.utils.data.DistributedSampler(
             dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
         )
@@ -337,7 +337,7 @@ def main(args, ds_init):
 
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
-        log_writer = utils.TensorboardLogger(log_dir=args.log_dir, experiment=args.experiment)
+        log_writer = logers.TensorboardLogger(log_dir=args.log_dir, experiment=args.experiment)
     else:
         log_writer = None
 
@@ -377,10 +377,10 @@ def main(args, ds_init):
         data_loader_val = None
         data_loader_test = None
 
-    transformer_model = get_models(args)
+    encoder_model = get_encoder_models(args)
     vqnsp_model = get_visual_tokenizer(args)
 
-    patch_size = transformer_model.patch_size
+    patch_size = encoder_model.patch_size
     print("Patch size = %s" % str(patch_size))
     args.window_size = (1, args.input_size // patch_size)
     args.patch_size = patch_size
@@ -411,7 +411,7 @@ def main(args, ds_init):
                     pass
             checkpoint_model = new_dict
 
-        state_dict = transformer_model.state_dict()
+        state_dict = encoder_model.state_dict()
         for k in ['head.weight', 'head.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
@@ -424,29 +424,29 @@ def main(args, ds_init):
         # redundant norm layer from legacy model
         checkpoint_model = {k.replace(".fc_norm.", ".norm."): v for k, v in checkpoint_model.items()}
 
-        utils.load_state_dict(transformer_model, checkpoint_model, prefix=args.model_prefix)
+        models_io.load_state_dict(encoder_model, checkpoint_model, prefix=args.model_prefix)
 
-    transformer_model.to(device)
+    encoder_model.to(device)
     if vqnsp_model is not None:
         vqnsp_model.to(device)
 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA transformer_model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        # Important to create EMA encoder_model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
-            transformer_model,
+            encoder_model,
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
             resume='')
         print("Using EMA with decay = %.8f" % args.model_ema_decay)
 
-    model_without_ddp = transformer_model
-    n_parameters = sum(p.numel() for p in transformer_model.parameters() if p.requires_grad)
+    model_without_ddp = encoder_model
+    n_parameters = sum(p.numel() for p in encoder_model.parameters() if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
 
-    total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
+    total_batch_size = args.batch_size * args.update_freq * dist_utils.get_world_size()
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
     print("LR = %.8f" % args.lr)
     print("Batch size = %d" % total_batch_size)
@@ -465,7 +465,7 @@ def main(args, ds_init):
     if assigner is not None:
         print("Assigned values = %s" % str(assigner.values))
 
-    skip_weight_decay_list = transformer_model.no_weight_decay()
+    skip_weight_decay_list = encoder_model.no_weight_decay()
     if args.disable_weight_decay_on_rel_pos_bias:
         for i in range(num_layers):
             skip_weight_decay_list.add("blocks.%d.attn.relative_position_bias_table" % i)
@@ -473,19 +473,19 @@ def main(args, ds_init):
     if args.enable_deepspeed:
         loss_scaler = None
         optimizer_params = get_parameter_groups(
-            transformer_model, args.weight_decay, skip_weight_decay_list,
+            encoder_model, args.weight_decay, skip_weight_decay_list,
             assigner.get_layer_id if assigner is not None else None,
             assigner.get_scale if assigner is not None else None)
-        transformer_model, optimizer, _, _ = ds_init(
-            args=args, model=transformer_model, model_parameters=optimizer_params, dist_init_required=not args.distributed,
+        encoder_model, optimizer, _, _ = ds_init(
+            args=args, model=encoder_model, model_parameters=optimizer_params, dist_init_required=not args.distributed,
         )
 
-        print("transformer_model.gradient_accumulation_steps() = %d" % transformer_model.gradient_accumulation_steps())
-        assert transformer_model.gradient_accumulation_steps() == args.update_freq
+        print("encoder_model.gradient_accumulation_steps() = %d" % encoder_model.gradient_accumulation_steps())
+        assert encoder_model.gradient_accumulation_steps() == args.update_freq
     else:
         if args.distributed:
-            transformer_model = torch.nn.parallel.DistributedDataParallel(transformer_model, device_ids=[args.gpu], find_unused_parameters=True)
-            model_without_ddp = transformer_model.module
+            encoder_model = torch.nn.parallel.DistributedDataParallel(encoder_model, device_ids=[args.gpu], find_unused_parameters=True)
+            model_without_ddp = encoder_model.module
 
         blocks_filter = [f"blocks.{i}." for i in range(num_layers-2)]
         filter_opt =  ["cls_token", "embed"] + blocks_filter
@@ -499,13 +499,13 @@ def main(args, ds_init):
         loss_scaler = NativeScaler()
 
     print("Use step level LR scheduler!")
-    lr_schedule_values = utils.cosine_scheduler(
+    lr_schedule_values = optimizers.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
     if args.weight_decay_end is None:
         args.weight_decay_end = args.weight_decay
-    wd_schedule_values = utils.cosine_scheduler(
+    wd_schedule_values = optimizers.cosine_scheduler(
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
@@ -518,8 +518,8 @@ def main(args, ds_init):
 
     print("criterion = %s" % str(criterion))
 
-    utils.auto_load_model(
-        args=args, model=transformer_model, model_without_ddp=model_without_ddp,
+    models_io.auto_load_model(
+        args=args, model=encoder_model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
             
     if args.eval:
@@ -528,12 +528,12 @@ def main(args, ds_init):
         accuracy = []
         if type(dataset_test) == list:
             for data_loader in data_loader_test:
-                test_stats = evaluate(data_loader, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
+                test_stats = evaluate_classifier(data_loader, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
                 accuracy.append(test_stats['accuracy'])
                 balanced_accuracy.append(test_stats['balanced_accuracy'])
         else:
-            test_stats = evaluate(data_loader_test, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics,
-                                  is_binary=(args.nb_classes == 1))
+            test_stats = evaluate_classifier(data_loader_test, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics,
+                                             is_binary=(args.nb_classes == 1))
             accuracy.append(test_stats['accuracy'])
             balanced_accuracy.append(test_stats['balanced_accuracy'])
         print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
@@ -551,8 +551,8 @@ def main(args, ds_init):
             log_writer.writer.add_text('tarin', f"EPOCH {epoch}", global_step=epoch)
         print(f"Epoch {epoch} starting ...")
 
-        train_stats = train_one_epoch(
-            transformer_model, vqnsp_model, criterion, data_loader_train, optimizer,
+        train_stats =   train_one_epoch(
+            encoder_model, vqnsp_model, criterion, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad,
             transformer_model_ema=model_ema,
             log_writer=log_writer,
@@ -567,21 +567,21 @@ def main(args, ds_init):
         )
         print(f"Epoch {epoch} training finished.")
         if args.output_dir and args.save_ckpt:
-            utils.save_model(
-                args=args, model=transformer_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+            models_io.save_model(
+                args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema, save_ckpt_freq=args.save_ckpt_freq)
             
         if data_loader_val is not None:
-            val_stats = evaluate(data_loader_val, transformer_model, device, header='Val:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            val_stats = evaluate_classifier(data_loader_val, encoder_model, device, header='Val:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_stats['accuracy']:.2f}%")
-            test_stats = evaluate(data_loader_test, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            test_stats = evaluate_classifier(data_loader_test, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_stats['accuracy']:.2f}%")
             
             if max_accuracy < val_stats["accuracy"]:
                 max_accuracy = val_stats["accuracy"]
                 if args.output_dir and args.save_ckpt:
-                    utils.save_model(
-                        args=args, model=transformer_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                    models_io.save_model(
+                        args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                         loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
                 max_accuracy_test = test_stats["accuracy"]
 
@@ -628,7 +628,7 @@ def main(args, ds_init):
                          'epoch': epoch,
                          'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
+        if args.output_dir and dist_utils.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
