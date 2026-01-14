@@ -15,15 +15,6 @@ from timm.models.registry import register_model
 from models.neural_transformer import NeuralTransformer
 
 
-# def _cfg(url='', **kwargs):
-#     return {
-#         'url': url,
-#         'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': None,
-#         'crop_pct': .9, 'interpolation': 'bicubic',
-#         'mean': (0.5, 0.5, 0.5), 'std': (0.5, 0.5, 0.5),
-#         **kwargs
-#     }
-
 @register_model
 def labram_base_patch200_200(pretrained=False, **kwargs) -> NeuralTransformer:
     model = NeuralTransformer(
