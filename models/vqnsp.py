@@ -5,8 +5,8 @@ from timm.layers import trunc_normal_
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from codebook_embedding import NormEMAVectorQuantizer
-from neural_transformer import NeuralTransformer
+from models.codebook_embedding import NormEMAVectorQuantizer
+from models.neural_transformer import NeuralTransformer
 
 
 class VQNSP(nn.Module):

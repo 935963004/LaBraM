@@ -116,7 +116,6 @@ def get_args():
 
 
 def get_visual_tokenizer(args, **kwargs) -> VQNSP:
-       
     model = create_model(
         args.model,
         pretrained=False,

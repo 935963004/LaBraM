@@ -12,7 +12,7 @@ import torch
 from timm.models.registry import register_model
 from torch import nn
 
-from vqnsp import VQNSP
+from models.vqnsp import VQNSP
 
 
 @register_model

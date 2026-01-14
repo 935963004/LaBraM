@@ -31,9 +31,10 @@ from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayV
 
 from train.train_finetuning_classifier import train_one_epoch, evaluate_classifier
 
-from run_vqnsp_trainer import get_visual_tokenizer
 from models.neural_transformer import NeuralTransformer
-
+from models.vqnsp import VQNSP
+import  models.factory_finetune_classiffers
+import models.factory_vqnsp
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -638,6 +639,18 @@ def main(args, ds_init):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
+def get_visual_tokenizer(args, **kwargs) -> VQNSP:
+
+    model = create_model(
+        args.tokenizer_model,
+        pretrained=False,
+        as_tokenzer=False,
+        n_code=args.codebook_size,
+        code_dim=args.codebook_dim,
+        EEG_size=args.input_size,
+        decay=args.model_ema_decay
+    )
+    return model
 
 if __name__ == '__main__':
     opts, ds_init = get_args()

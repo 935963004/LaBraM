@@ -14,10 +14,9 @@ from typing import Iterable
 
 import torch
 
-import logers
+from train.logers import MetricLogger, SmoothedValue
 from data import eeg_consts
 from models.vqnsp import VQNSP
-from training_utils import SmoothedValue
 from utils import dist_utils
 
 
@@ -36,7 +35,7 @@ def train_one_epoch(model: VQNSP,
                             args=None,
                             ):
     model.train()
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -133,7 +132,7 @@ def train_one_epoch(model: VQNSP,
 
 @torch.no_grad()
 def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_names_list=None, args=None):
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     header = 'Validation:'
 
     # switch to evaluation mode
@@ -178,7 +177,7 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
 
 @torch.no_grad()
 def calculate_codebook_usage(data_loader, model, device, log_writer=None, epoch=None, args=None):
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     header = 'Calculating codebook usage:'
 
     # switch to evaluation mode

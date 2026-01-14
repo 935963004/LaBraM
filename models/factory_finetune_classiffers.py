@@ -12,7 +12,7 @@ from functools import partial
 import torch.nn as nn
 from timm.models.registry import register_model
 
-from neural_transformer import NeuralTransformer
+from models.neural_transformer import NeuralTransformer
 
 
 # def _cfg(url='', **kwargs):

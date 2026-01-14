@@ -14,7 +14,7 @@ from scipy.signal import resample
 from sklearn.model_selection import train_test_split
 
 from data_processor.dataset import ShockDataset
-from eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE
+from data.eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE
 
 
 class HMCLoader(Dataset):

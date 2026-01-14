@@ -61,7 +61,7 @@ You may also implement your own preprocessing pipeline, but please ensure it mat
 The tokenizer is trained via **vector-quantized neural spectrum prediction (VQ-NSP)**. We recommend training on **8 × NVIDIA RTX 3090 (or better)** GPUs.
 
 ```bash
-OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_training.py \
+OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_trainer.py \
     --output_dir ./checkpoints/vqnsp/ \
     --log_dir ./log/vqnsp/ \
     --model vqnsp_encoder_base_decoder_3x200x12 \
@@ -84,7 +84,7 @@ OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_training.py \
 Pre-train LaBraM by reconstructing masked neural codes from EEG channel patches:
 
 ```bash
-OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_labram_pretraining.py \
+OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_labram_mask_pretraining_trainer.py \
     --output_dir ./checkpoints/labram_base \
     --log_dir ./log/labram_base \
     --model labram_base_patch200_1600_8k_vocab \
@@ -118,7 +118,7 @@ dataset_maker/make_TUEV.py
 This includes preprocessing and splitting into train/val/test sets. Hyperparameters such as **learning rate** and **warmup epochs** strongly affect results—tune them for best performance. Below is the TUAB example:
 
 ```bash
-OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning.py \
+OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_class_finetuning_trainer.py \
     --output_dir ./checkpoints/finetune_tuab_base/ \
     --log_dir ./log/finetune_tuab_base \
     --model labram_base_patch200_200 \

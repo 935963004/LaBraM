@@ -3,7 +3,7 @@ from timm.layers import drop_path
 from torch import nn as nn
 from torch.nn import functional as F
 
-from mlp_blocks import Mlp
+from layers.mlp_blocks import Mlp
 
 
 class Attention(nn.Module):
