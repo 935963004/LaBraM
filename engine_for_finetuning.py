@@ -9,17 +9,45 @@
 # ---------------------------------------------------------
 import math
 import sys
-from typing import Iterable, Optional, List
+from typing import Iterable, Optional, List, Dict, Any
 import torch
 from timm.utils import ModelEma
 import utils
 from einops import rearrange
 from tqdm import tqdm
+from torch import nn, Tensor
+from modeling_finetune import NeuralTransformer
+from modeling_vqnsp import VQNSP
 
-def train_class_batch(model, samples, target, criterion, ch_names):
-    outputs = model(samples, ch_names)
-    loss = criterion(outputs, target)
-    return loss, outputs
+
+def train_class_batch(pred_model: NeuralTransformer,
+                      vqnsp_model: Optional[VQNSP],
+                      samples: Tensor,
+                      target: Tensor,
+                      criterion: nn.Module,
+                      ch_names: List[str],
+                      use_cls_token=False) -> tuple[Dict[str, Tensor], Tensor]:
+    batch_size, n_channels, n_samples, times = samples.shape
+    out_pred = pred_model.forward(samples, ch_names)
+    patch_tokens = out_pred['patch_tokens']
+    pred_class = out_pred['pred_class']
+
+    if vqnsp_model is not None:
+        codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
+                                                                                         n_channels)
+        rec_amplitude_loss, rec_phase_loss = vqnsp_model.get_spectral_quantize_recon_losses(samples, quantize_tokens, ch_names)
+    else:
+        quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
+    loss_finetune_class = criterion(pred_class, target)
+
+    loss_total = loss_finetune_class + quantize_loss + rec_amplitude_loss + 0.1*rec_phase_loss
+    loss = {"loss_total": loss_total,
+            "loss_finetune_class": loss_finetune_class,
+            "quantize_loss": quantize_loss,
+            "rec_amplitude_loss": rec_amplitude_loss ,
+            "rec_phase_loss": rec_phase_loss}
+
+    return loss, pred_class
 
 
 def get_loss_scale_for_deepspeed(model):
@@ -27,18 +55,30 @@ def get_loss_scale_for_deepspeed(model):
     return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
 
 
-def train_one_epoch(model: torch.nn.Module,
+def train_one_epoch(transformer_model: torch.nn.Module,
+                    vqnsp_model: Optional[VQNSP],
                     criterion: torch.nn.Module,
                     data_loader: torch.utils.data.DataLoader,
                     optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, log_writer=None,
-                    start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None, ch_names=None, is_binary=True):
+                    device: torch.device,
+                    epoch: int,
+                    loss_scaler,
+                    max_norm: float = 0,
+                    transformer_model_ema: Optional[ModelEma] = None,
+                    log_writer=None,
+                    start_steps=None,
+                    lr_schedule_values=None,
+                    wd_schedule_values=None,
+                    num_training_steps_per_epoch=None,
+                    update_freq=None,
+                    ch_names=None,
+                    is_binary=True,
+                    use_cls_token=False,
+                    ):
     input_chans = None
     if ch_names is not None:
         input_chans = utils.get_input_chans(ch_names)
-    model.train(True)
+    transformer_model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -46,8 +86,8 @@ def train_one_epoch(model: torch.nn.Module,
     print_freq = 10
 
     if loss_scaler is None:
-        model.zero_grad()
-        model.micro_steps = 0
+        transformer_model.zero_grad()
+        transformer_model.micro_steps = 0
     else:
         optimizer.zero_grad()
 
@@ -67,6 +107,10 @@ def train_one_epoch(model: torch.nn.Module,
 
         samples = samples.float().to(device, non_blocking=True) / 100
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
+
+        # with torch.no_grad():
+        #     with torch.cuda.amp.autocast():
+        #         input_ids = vqnsp_model.get_codebook_indices(samples, input_chans)
         
         targets = targets.to(device, non_blocking=True)
         if is_binary:
@@ -74,42 +118,45 @@ def train_one_epoch(model: torch.nn.Module,
 
         if loss_scaler is None:
             samples = samples.half()
-            loss, output = train_class_batch(
-                model, samples, targets, criterion, input_chans)
+            losses, output = train_class_batch(
+                transformer_model, vqnsp_model, samples, targets, criterion, input_chans,
+            use_cls_token=use_cls_token)
         else:
             with torch.amp.autocast(device_type=device.type):
-                loss, output = train_class_batch(
-                    model, samples, targets, criterion, input_chans)
+                losses, output = train_class_batch(
+                    transformer_model, vqnsp_model, samples, targets, criterion, input_chans,
+                    use_cls_token=use_cls_token)
 
-        loss_value = loss.item()
+        loss_total = losses["loss_total"]
+        loss_value = loss_total.item()
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
         if loss_scaler is None:
-            loss /= update_freq
-            model.backward(loss)
-            model.step()
+            loss_total /= update_freq
+            transformer_model.backward(loss_total)
+            transformer_model.step()
 
             if (data_iter_step + 1) % update_freq == 0:
                 # model.zero_grad()
                 # Deepspeed will call step() & model.zero_grad() automatic
-                if model_ema is not None:
-                    model_ema.update(model)
+                if transformer_model_ema is not None:
+                    transformer_model_ema.update(transformer_model)
             grad_norm = None
-            loss_scale_value = get_loss_scale_for_deepspeed(model)
+            loss_scale_value = get_loss_scale_for_deepspeed(transformer_model)
         else:
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss /= update_freq
-            grad_norm = loss_scaler(loss, optimizer, clip_grad=max_norm,
-                                    parameters=model.parameters(), create_graph=is_second_order,
+            loss_total /= update_freq
+            grad_norm = loss_scaler(loss_total, optimizer, clip_grad=max_norm,
+                                    parameters=transformer_model.parameters(), create_graph=is_second_order,
                                     update_grad=(data_iter_step + 1) % update_freq == 0)
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
-                if model_ema is not None:
-                    model_ema.update(model)
+                if transformer_model_ema is not None:
+                    transformer_model_ema.update(transformer_model)
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         if device.type == 'cuda':
@@ -124,7 +171,10 @@ def train_one_epoch(model: torch.nn.Module,
         else:
             class_acc = (output.max(-1)[-1] == targets.squeeze()).float().mean()
             
-        metric_logger.update(loss=loss_value)
+        # metric_logger.update(loss=loss_value)
+        for key, loss_value in losses.items():
+            metric_logger.meters[key].update(loss_value.item())
+
         metric_logger.update(class_acc=class_acc)
         metric_logger.update(loss_scale=loss_scale_value)
         min_lr = 10.
@@ -143,7 +193,9 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(grad_norm=grad_norm)
 
         if log_writer is not None:
-            log_writer.update(loss=loss_value, head="loss")
+            # log_writer.update(loss=loss_value, head="loss")
+            for key, loss_value in losses.items():
+                log_writer.update(loss=loss_value.item(), head=f"loss/{key}")
             log_writer.update(class_acc=class_acc, head="loss")
             log_writer.update(loss_scale=loss_scale_value, head="opt")
             log_writer.update(lr=max_lr, head="opt")
@@ -198,17 +250,17 @@ def evaluate(data_loader: torch.utils.data.DataLoader,
         
         # compute output
         with torch.amp.autocast(device_type=device.type):
-            output = model(EEG, input_chans=input_chans)
-            loss = criterion(output, target)
+            pred_class = model(EEG, input_chans=input_chans)['pred_class']
+            loss = criterion(pred_class, target)
         
         if is_binary:
-            output = torch.sigmoid(output).cpu()
+            pred_class = torch.sigmoid(pred_class).cpu()
         else:
-            output = output.cpu()
+            pred_class = pred_class.cpu()
         target = target.cpu()
 
-        results = utils.get_metrics(output.numpy(), target.numpy(), metrics, is_binary)
-        pred.append(output)
+        results = utils.get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
+        pred.append(pred_class)
         true.append(target)
 
         batch_size = EEG.shape[0]

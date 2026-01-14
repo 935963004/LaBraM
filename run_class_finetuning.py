@@ -32,7 +32,8 @@ from engine_for_finetuning import train_one_epoch, evaluate
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
 from scipy import interpolate
-import modeling_finetune
+from run_labram_pretraining import get_visual_tokenizer
+from modeling_finetune import NeuralTransformer
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -76,6 +77,15 @@ def get_args():
     parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
     parser.add_argument('--classifier_type', default='linear', type=str, metavar='CLASSIFIER_HEAD',
                         help='Type of classification head to use linear/MLP(3 layers) (default: "linear")')
+
+    # tokenizer settings
+    parser.add_argument("--use_tokenizer", action="store_true", help="Use tokenizer or not.")
+    parser.add_argument("--tokenizer_weight", type=str, help="Path to tokenizer weight")
+    parser.add_argument("--tokenizer_model", type=str, default="vqnsp_encoder_base_decoder_3x200x12")
+
+    # Tokenizer parameters
+    parser.add_argument('--codebook_size', default=8192, type=int, help='number of codebook')
+    parser.add_argument('--codebook_dim', default=32, type=int, help='number of codebook')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -150,7 +160,7 @@ def get_args():
                         help='resume from checkpoint')
     parser.add_argument('--auto_resume', action='store_true')
     parser.add_argument('--no_auto_resume', action='store_false', dest='auto_resume')
-    parser.set_defaults(auto_resume=True)
+    parser.set_defaults(auto_resume=False)
 
     parser.add_argument('--save_ckpt', action='store_true')
     parser.add_argument('--no_save_ckpt', action='store_false', dest='save_ckpt')
@@ -199,7 +209,7 @@ def get_args():
 
     return parser.parse_args(), ds_init
 
-def get_models(args):
+def get_models(args) ->NeuralTransformer:
     use_mem_pooling = args.use_mean_pooling if not args.use_cls else False
     model = create_model(
         args.model,
@@ -246,10 +256,11 @@ def get_dataset(args):
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif args.dataset == 'INTERNAL':
         args.nb_classes = 1 #3
-        is_normal_abnormal = True
-        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/EpilepticEEG_processed_10sec")
-        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/EpilepticEEG/epileptic_labels.csv")
-        label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+        is_normal_abnormal = False
+        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec")
+        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv")
+        # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+        label_names = ['is_control', 'is_lesion']
         ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
                  'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
         # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
@@ -366,9 +377,10 @@ def main(args, ds_init):
         data_loader_val = None
         data_loader_test = None
 
-    model = get_models(args)
+    transformer_model = get_models(args)
+    vqnsp_model = get_visual_tokenizer(args)
 
-    patch_size = model.patch_size
+    patch_size = transformer_model.patch_size
     print("Patch size = %s" % str(patch_size))
     args.window_size = (1, args.input_size // patch_size)
     args.patch_size = patch_size
@@ -399,7 +411,7 @@ def main(args, ds_init):
                     pass
             checkpoint_model = new_dict
 
-        state_dict = model.state_dict()
+        state_dict = transformer_model.state_dict()
         for k in ['head.weight', 'head.bias']:
             if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
                 print(f"Removing key {k} from pretrained checkpoint")
@@ -409,23 +421,27 @@ def main(args, ds_init):
         for key in all_keys:
             if "relative_position_index" in key:
                 checkpoint_model.pop(key)
+        # redundant norm layer from legacy model
+        checkpoint_model = {k.replace(".fc_norm.", ".norm."): v for k, v in checkpoint_model.items()}
 
-        utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+        utils.load_state_dict(transformer_model, checkpoint_model, prefix=args.model_prefix)
 
-    model.to(device)
+    transformer_model.to(device)
+    if vqnsp_model is not None:
+        vqnsp_model.to(device)
 
     model_ema = None
     if args.model_ema:
-        # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
+        # Important to create EMA transformer_model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
         model_ema = ModelEma(
-            model,
+            transformer_model,
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
             resume='')
         print("Using EMA with decay = %.8f" % args.model_ema_decay)
 
-    model_without_ddp = model
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    model_without_ddp = transformer_model
+    n_parameters = sum(p.numel() for p in transformer_model.parameters() if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
@@ -437,7 +453,9 @@ def main(args, ds_init):
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(dataset_train))
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
-
+    use_cls_token = args.use_cls
+    print("Use cls token = %s" % str(use_cls_token))
+    print("Use tokenizer: %s" % str(args.use_tokenizer))
     num_layers = model_without_ddp.get_num_layers()
     if args.layer_decay < 1.0:
         assigner = LayerDecayValueAssigner(list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)))
@@ -447,7 +465,7 @@ def main(args, ds_init):
     if assigner is not None:
         print("Assigned values = %s" % str(assigner.values))
 
-    skip_weight_decay_list = model.no_weight_decay()
+    skip_weight_decay_list = transformer_model.no_weight_decay()
     if args.disable_weight_decay_on_rel_pos_bias:
         for i in range(num_layers):
             skip_weight_decay_list.add("blocks.%d.attn.relative_position_bias_table" % i)
@@ -455,21 +473,21 @@ def main(args, ds_init):
     if args.enable_deepspeed:
         loss_scaler = None
         optimizer_params = get_parameter_groups(
-            model, args.weight_decay, skip_weight_decay_list,
+            transformer_model, args.weight_decay, skip_weight_decay_list,
             assigner.get_layer_id if assigner is not None else None,
             assigner.get_scale if assigner is not None else None)
-        model, optimizer, _, _ = ds_init(
-            args=args, model=model, model_parameters=optimizer_params, dist_init_required=not args.distributed,
+        transformer_model, optimizer, _, _ = ds_init(
+            args=args, model=transformer_model, model_parameters=optimizer_params, dist_init_required=not args.distributed,
         )
 
-        print("model.gradient_accumulation_steps() = %d" % model.gradient_accumulation_steps())
-        assert model.gradient_accumulation_steps() == args.update_freq
+        print("transformer_model.gradient_accumulation_steps() = %d" % transformer_model.gradient_accumulation_steps())
+        assert transformer_model.gradient_accumulation_steps() == args.update_freq
     else:
         if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-            model_without_ddp = model.module
+            transformer_model = torch.nn.parallel.DistributedDataParallel(transformer_model, device_ids=[args.gpu], find_unused_parameters=True)
+            model_without_ddp = transformer_model.module
 
-        blocks_filter = [f"blocks.{i}." for i in range(num_layers)]
+        blocks_filter = [f"blocks.{i}." for i in range(num_layers-2)]
         filter_opt =  ["cls_token", "embed"] + blocks_filter
         optimizer = create_optimizer(
             args, model_without_ddp,
@@ -501,7 +519,7 @@ def main(args, ds_init):
     print("criterion = %s" % str(criterion))
 
     utils.auto_load_model(
-        args=args, model=model, model_without_ddp=model_without_ddp,
+        args=args, model=transformer_model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
             
     if args.eval:
@@ -510,11 +528,11 @@ def main(args, ds_init):
         accuracy = []
         if type(dataset_test) == list:
             for data_loader in data_loader_test:
-                test_stats = evaluate(data_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
+                test_stats = evaluate(data_loader, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
                 accuracy.append(test_stats['accuracy'])
                 balanced_accuracy.append(test_stats['balanced_accuracy'])
         else:
-            test_stats = evaluate(data_loader_test, model, device, header='Test:', ch_names=ch_names, metrics=metrics,
+            test_stats = evaluate(data_loader_test, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics,
                                   is_binary=(args.nb_classes == 1))
             accuracy.append(test_stats['accuracy'])
             balanced_accuracy.append(test_stats['balanced_accuracy'])
@@ -534,30 +552,36 @@ def main(args, ds_init):
         print(f"Epoch {epoch} starting ...")
 
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer,
-            device, epoch, loss_scaler, args.clip_grad, model_ema,
-            log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
-            lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq, 
-            ch_names=ch_names, is_binary=args.nb_classes == 1
+            transformer_model, vqnsp_model, criterion, data_loader_train, optimizer,
+            device, epoch, loss_scaler, args.clip_grad,
+            transformer_model_ema=model_ema,
+            log_writer=log_writer,
+            start_steps=epoch * num_training_steps_per_epoch,
+            lr_schedule_values=lr_schedule_values,
+            wd_schedule_values=wd_schedule_values,
+            num_training_steps_per_epoch=num_training_steps_per_epoch,
+            update_freq=args.update_freq,
+            ch_names=ch_names,
+            is_binary=args.nb_classes == 1,
+            use_cls_token=use_cls_token
         )
         print(f"Epoch {epoch} training finished.")
         if args.output_dir and args.save_ckpt:
             utils.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                args=args, model=transformer_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema, save_ckpt_freq=args.save_ckpt_freq)
             
         if data_loader_val is not None:
-            val_stats = evaluate(data_loader_val, model, device, header='Val:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            val_stats = evaluate(data_loader_val, transformer_model, device, header='Val:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_stats['accuracy']:.2f}%")
-            test_stats = evaluate(data_loader_test, model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            test_stats = evaluate(data_loader_test, transformer_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_stats['accuracy']:.2f}%")
             
             if max_accuracy < val_stats["accuracy"]:
                 max_accuracy = val_stats["accuracy"]
                 if args.output_dir and args.save_ckpt:
                     utils.save_model(
-                        args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                        args=args, model=transformer_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                         loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
                 max_accuracy_test = test_stats["accuracy"]
 

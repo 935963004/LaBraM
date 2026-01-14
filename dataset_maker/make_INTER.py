@@ -6,6 +6,7 @@ import os
 import pickle
 from warnings import warn
 from sklearn.frozen.tests.test_frozen import regression_dataset
+from torch.utils.hipify.hipify_python import meta_data
 from tqdm import tqdm
 from functools import partial
 from multiprocessing import Pool
@@ -22,21 +23,34 @@ MIN_LEN_SEC = 200
 TBL_DB_NAME = "main.results"
 
 def process_inter_dataset():
-    input_path = "/home/leong/data/EEG/INTER_DATA/EpilepticEEG"
-    out_path = "/home/leong/data/EEG/INTER_DATA/EpilepticEEG_processed_10sec"
+    meta_data_path = "/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv"
+    input_path = "/home/leong/data/EEG/INTER_DATA/20K-EEG/"
+    out_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
+    labels = ["is_control", "is_lesion"]
+    # n_samples = 1000
+    balanced = False
+    len_chunk_sec = 10
+    n_jobs = 16#16
+    save_chunks = False
 
     config_raw = {"eeg_file_suffix": ".fif",
                   "l_freq": 0.1,
                   "h_freq": 75.0,
-                  "sec_sample": 200,
+                  "sampling_rate": 200,
                   "notch_filter_freq": 50.0,
-                  "len_seq_sec": 10,
-                  "n_jobs": 16,
+                  "len_chunk_sec": len_chunk_sec,
+                  "meta_data_path": meta_data_path,
+                  "labels": labels,
+                  "n_jobs": n_jobs,
                   "resample_n_jobs": 1,
-                  "units": 'uV'}
+                  "units": 'uV',
+                  "save_chunks": save_chunks}
     process_all_to_fit(input_path, config_raw, out_path)
 
-def process_all_to_fit_files(db_path: str, config_raw: dict, out_path: str, jobs: int = 10):
+def process_all_to_fit_files(db_path: str,
+                             config_raw: dict,
+                             out_path: str,
+                             jobs: int = 10):
     pool = Pool(processes=jobs)
     pool.map(partial(process_duckdb_to_fit,
                      config_raw=config_raw,
@@ -61,6 +75,7 @@ def read_eeg_channels_from_raw_mne(file_path: Union[str, Path], eeg_channels=Non
     raw_data = mne.io.read_raw(file_path, preload=True)
     raw_data = raw_data.rename_channels(lambda x: x.upper())
     raw_data = raw_data.pick_channels(eeg_channels).reorder_channels(eeg_channels)
+
     return raw_data
 
 def read_duckdb(path) -> pd.DataFrame:
@@ -81,11 +96,11 @@ def process_raw(raw: RawArray, config: Dict[str, Any], n_jobs: int = 1) -> RawAr
     l_freq = config["l_freq"]
     h_freq = config["h_freq"]
     notch_filter_freq = config["notch_filter_freq"]
-    sec_sample = config["sec_sample"]
+    sampling_rate = config["sampling_rate"]
     ch_names = raw.ch_names
     raw.filter(l_freq=l_freq, h_freq=h_freq, picks=ch_names, n_jobs=n_jobs, verbose=False)
     raw.notch_filter(notch_filter_freq, picks=ch_names, n_jobs=n_jobs)
-    raw.resample(sec_sample, n_jobs=n_jobs)
+    raw.resample(sampling_rate, n_jobs=n_jobs)
 
     return raw
 
@@ -98,8 +113,8 @@ def process_eeg_files(file_paths: Iterable[Union[str,Path]],
     assert all(map(lambda x: x.is_file(), file_paths)), "Not all files exist"
     out_path = Path(out_path)
     assert out_path.is_dir(), f"Output path {out_path} does not exist"
-    len_seq_sec = config["len_seq_sec"]
-    len_samples = len_seq_sec * config["sec_sample"]
+    len_chunk_sec = config["len_chunk_sec"]
+    len_chunk = len_chunk_sec * config["sampling_rate"]
     resample_n_jobs = config["resample_n_jobs"]
     out_files = []
     eeg_channels = CH_DB
@@ -113,32 +128,34 @@ def process_eeg_files(file_paths: Iterable[Union[str,Path]],
         if raw_array.duration < MIN_LEN_SEC:
             warn(f"Subject {id_key} has too short duration: {raw_array.duration} sec < {MIN_LEN_SEC} sec")
             continue
-        # raw_array = raw_array.crop(0, len_seq_sec)
         raw_array = process_raw(raw_array, config, n_jobs=resample_n_jobs)
         raw_array = raw_array.set_channel_types(channel_type_mapping,
                                                 on_unit_change="ignore",
                                                 verbose=False)
-        
-        eeg_array = raw_array.get_data(units=config["units"], picks=eeg_channels)
-        save_chunks_files = save_eeg_intervals(eeg_array, out_path, id_key, len_samples)
-        # if np.abs(eeg_array.shape[1] - len_seq_sec * config["sec_sample"]) > 1.0:
-        #     raise ValueError(f"Raw array shape {eeg_array.shape[1] / config['sec_sample']} "
-        #                      f"does not match expected length {len_seq_sec}")
-        # out_file = Path(out_path, id_key).with_suffix(".npy")
-        # np.save(out_file, eeg_array)
-        # if not out_file.exists():
-        #     raise FileExistsError(f"File {out_file} does not exist")
-        # raw_array.save(out_file, overwrite=True)
+
+
+        if config.get("save_chunks", False):
+            ## save chunks in numpy format
+            eeg_array = raw_array.get_data(units=config["units"], picks=eeg_channels)
+            save_chunks_files = save_eeg_chunks(eeg_array, out_path, id_key, len_chunk)
+        else:
+            ## save hole process EEG signal in fif format
+            out_file = Path(out_path, id_key).with_suffix(".fif")
+            raw_array.save(out_file, overwrite=True)
+
         out_files += save_chunks_files
     return out_files
 
-def save_eeg_intervals(eeg_array: np.ndarray, save_path: Union[str, Path], id_key: str, len_samples: int) -> List[Path]:
-    n_chunks = eeg_array.shape[1] // len_samples
-    eeg_chunks = np.hsplit(eeg_array[:,:n_chunks* len_samples], n_chunks)
+def save_eeg_chunks(eeg_array: np.ndarray,
+                    save_path: Union[str, Path],
+                    id_key: str,
+                    len_chunk: int) -> List[Path]:
+    n_chunks = eeg_array.shape[1] // len_chunk
+    eeg_split_chunks = np.hsplit(eeg_array[:,:n_chunks * len_chunk], n_chunks)
     out_files = []
     for ind in range(n_chunks):
         out_file = Path(save_path, f"{id_key}_{ind}").with_suffix(".npy")
-        np.save(out_file, eeg_chunks[ind])
+        np.save(out_file, eeg_split_chunks[ind])
         out_files.append(out_file)
     return out_files
 
@@ -154,6 +171,16 @@ def process_all_to_fit(input_path: str, config: Dict[str, Any], out_path: str):
     assert all(map(lambda x: x.is_file(), file_eeg_paths)), \
         f'Not all files are eeg files{pattern} in path: {input_path.name}'
 
+    # Filter relevant files:
+    if "labels" in config and len(config["labels"]) > 0:
+        meta_data_df = pd.read_csv(config["meta_data_path"])
+        labels = config["labels"]
+        if not set(labels) < set(meta_data_df.columns):
+            raise ValueError(f"Labels {labels} not found in meta data columns {meta_data_df.columns}")
+        file_names_labels = meta_data_df[meta_data_df[labels].any(axis=1)]["fif_filename_hashed"]
+        file_eeg_paths = list(filter(lambda x: x.name in list(file_names_labels), file_eeg_paths))
+        if len(file_eeg_paths) == 0:
+            raise ValueError(f"No files left after filtering by labels {labels}")
     n_jobs = config.get("n_jobs")
     if n_jobs > 1:
         with Pool(processes=n_jobs) as pool:

@@ -56,7 +56,7 @@ def train_one_epoch(model: torch.nn.Module,
                         param_group["lr"] = lr_schedule_values[it] * param_group.get("lr_scale", 1.0)
             EEG = batch.float().to(device, non_blocking=True) / 100
 
-            with torch.cuda.amp.autocast(enabled=True):
+            with torch.amp.autocast('cuda'):
                 loss, log_loss = model(EEG, input_chans=input_chans)
 
             loss_value = loss.item()

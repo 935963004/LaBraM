@@ -16,7 +16,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-
+from typing import OrderedDict, Optional
 from pathlib import Path
 
 from timm.models import create_model
@@ -25,8 +25,8 @@ from optim_factory import create_optimizer
 from engine_for_pretraining import train_one_epoch
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
-import modeling_pretrain
-import modeling_vqnsp
+# import modeling_pretrain
+from modeling_vqnsp import VQNSP
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM pre-training script', add_help=False)
@@ -136,8 +136,16 @@ def get_model(args):
 
     return model
 
-def get_visual_tokenizer(args):
-    print(f"Creating visual tokenizer: {args.tokenizer_model}")
+def get_visual_tokenizer(args)-> Optional[VQNSP]:
+    if args.use_tokenizer is False:
+        print("No visual tokenizer is used!")
+        return None
+    print(f"Creating visual tokenizer: {args.tokenizer_model} \n"
+          f"codebook size: {args.codebook_size}, codebook dim: {args.codebook_dim} \n"
+          f"with pretrained weights from: {args.tokenizer_weight}")
+    if not Path(args.tokenizer_weight).is_file():
+        raise FileNotFoundError(f"Tokenizer model file {args.tokenizer_weight} does not exist")
+
     model = create_model(
             args.tokenizer_model,
             pretrained=True,
