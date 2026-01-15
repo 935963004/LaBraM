@@ -22,14 +22,14 @@ from pathlib import Path
 from timm.models import create_model
 
 from utils import dist_utils
-from data import eeg_datasets
+from data import patch_datasets
 from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
 
 from train.train_mask_pretraining import train_one_epoch
-from models.vqnsp import VQNSP
-from models.mask_modeling import NeuralTransformerForMEM
+from models.vqnsp_model import VQNSP
+from models.masked_neural_transformer import NeuralTransformerForMEM
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM pre-training script', add_help=False)
@@ -192,7 +192,7 @@ def main(args):
         4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
         8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
+    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
     # prepare visual tokenizer
     vqnsp = get_vqnsp_model(args).to(device)
 
