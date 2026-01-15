@@ -11,7 +11,6 @@
 import math
 import sys
 from typing import Iterable
-
 import torch
 
 from data import eeg_consts

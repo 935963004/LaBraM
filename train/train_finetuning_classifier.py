@@ -74,8 +74,7 @@ def train_one_epoch(transformer_model: torch.nn.Module,
                     num_training_steps_per_epoch=None,
                     update_freq=None,
                     ch_names=None,
-                    is_binary=True,
-                    use_cls_token=False,
+                    is_binary=True
                     ):
     input_chans = None
     if ch_names is not None:
@@ -110,10 +109,6 @@ def train_one_epoch(transformer_model: torch.nn.Module,
         samples = samples.float().to(device, non_blocking=True) / 100
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
 
-        # with torch.no_grad():
-        #     with torch.cuda.amp.autocast():
-        #         input_ids = vqnsp_model.get_codebook_indices(samples, input_chans)
-        
         targets = targets.to(device, non_blocking=True)
         if is_binary:
             targets = targets.float().unsqueeze(-1)

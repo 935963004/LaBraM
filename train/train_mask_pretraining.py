@@ -21,8 +21,8 @@ from torch import Tensor
 import logers
 import training_utils
 from data import eeg_consts
-from models.vqnsp import VQNSP
-from models.mask_modeling import NeuralTransformerForMEM
+from models.vqnsp_model import VQNSP
+from models.masked_neural_transformer import NeuralTransformerForMEM
 from utils import dist_utils
 
 
@@ -55,7 +55,7 @@ def train_one_epoch(encoder_model: NeuralTransformerForMEM,
         if len(data_loader) == 0:
             continue
         input_chans = eeg_consts.get_input_chans(ch_names)
-        for step, (batch) in enumerate(
+        for step, (samples) in enumerate(
                 metric_logger.log_every(data_loader, print_freq * args.gradient_accumulation_steps, header)):
             # assign learning rate & weight decay for each step
             it = start_steps + step + step_loader  # global training iteration
@@ -66,14 +66,14 @@ def train_one_epoch(encoder_model: NeuralTransformerForMEM,
                     if wd_schedule_values is not None and param_group["weight_decay"] > 0:
                         param_group["weight_decay"] = wd_schedule_values[it]
 
-            samples = batch
             samples = samples.float().to(device, non_blocking=True) / 100
             samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
             bool_masked_pos = random_masking(samples.flatten(1, 2), mask_ratio=0.5).to(device, non_blocking=True)
 
             with torch.no_grad():
-                with torch.cuda.amp.autocast():
-                    input_ids = vqnsp.get_codebook_indices(samples, input_chans)
+                with torch.autocast(device):
+                    input_ids = vqnsp.encode(samples, input_chans=input_chans)['codebook_ind']
+                    input_ids = input_ids.view(samples.shape[0], -1)
 
                 labels = input_ids[bool_masked_pos]
                 labels_sym = input_ids[~bool_masked_pos]

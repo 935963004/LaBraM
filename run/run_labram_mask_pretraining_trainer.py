@@ -26,7 +26,6 @@ from data import patch_datasets
 from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
-
 from train.train_mask_pretraining import train_one_epoch
 from models.vqnsp_model import VQNSP
 from models.masked_neural_transformer import NeuralTransformerForMEM

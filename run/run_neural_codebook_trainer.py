@@ -16,9 +16,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import json
 import os
-
 from pathlib import Path
-
 from timm.models import create_model
 
 from utils import dist_utils
@@ -26,7 +24,6 @@ from data import patch_datasets
 from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
-
 from train.train_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
 from models.vqnsp_model import VQNSP
 
