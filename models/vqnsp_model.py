@@ -47,23 +47,25 @@ class VQNSP(nn.Module):
 
         self.decoder_out_dim = decoder_out_dim
 
-        # task layer
+        # embedding to quantize space
         self.encode_task_layer = nn.Sequential(
             nn.Linear(encoder_config['embed_dim'], encoder_config['embed_dim']),
             nn.Tanh(),
             nn.Linear(encoder_config['embed_dim'], embed_dim) # for quantize
         )
+
+        # reconstruct amplitude and phase from decoder output
         self.decode_task_layer = nn.Sequential(
             nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
             nn.Tanh(),
             nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
-        ) # magnitude prediction
+        ) # magnitude predictor
 
         self.decode_task_layer_angle = nn.Sequential(
             nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
             nn.Tanh(),
             nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
-        ) # phase prediction
+        ) # phase predictor
 
         self.kwargs = kwargs
 
