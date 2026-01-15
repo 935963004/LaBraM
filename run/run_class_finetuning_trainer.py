@@ -23,7 +23,7 @@ from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import ModelEma
 
 from utils import dist_utils
-from data import eeg_datasets
+from data import patch_datasets
 from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayValueAssigner, \
@@ -31,9 +31,10 @@ from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayV
 
 from train.train_finetuning_classifier import train_one_epoch, evaluate_classifier
 
-from run_vqnsp_trainer import get_visual_tokenizer
 from models.neural_transformer import NeuralTransformer
-
+from models.vqnsp_model import VQNSP
+import  models.factory_finetune_classiffers
+import models.factory_vqnsp
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -234,14 +235,14 @@ def get_encoder_models(args) ->NeuralTransformer:
 def get_dataset(args):
     if args.dataset == 'TUAB':
         dataset_dir = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
-        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_TUAB_dataset(dataset_dir)
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(dataset_dir)
         ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
         args.nb_classes = 1
         metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy"]
     elif args.dataset == 'TUEV':
-        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_TUEV_dataset("path/to/TUEV")
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUEV_dataset("path/to/TUEV")
         ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
@@ -252,7 +253,7 @@ def get_dataset(args):
         args.nb_classes = 5
         metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
         dataset_dir = Path("/Users/leon/Data/neurolm_downstream", 'HMC')
-        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_HMC_dataset(dataset_dir)
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_HMC_dataset(dataset_dir)
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif args.dataset == 'INTERNAL':
         args.nb_classes = 1 #3
@@ -271,7 +272,7 @@ def get_dataset(args):
         # - recall: recall
         # score
         metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy", "f1", "recall", "precision"] # binary classification
-        train_dataset, test_dataset, val_dataset = eeg_datasets.prepare_internal_dataset(root_path=dataset_dir,
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_internal_dataset(root_path=dataset_dir,
                                                                                          seed=args.seed,
                                                                                          is_normal_abnormal=is_normal_abnormal,
                                                                                          class_labels=label_names,
@@ -638,6 +639,18 @@ def main(args, ds_init):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
+def get_visual_tokenizer(args, **kwargs) -> VQNSP:
+
+    model = create_model(
+        args.tokenizer_model,
+        pretrained=False,
+        as_tokenzer=False,
+        n_code=args.codebook_size,
+        code_dim=args.codebook_dim,
+        EEG_size=args.input_size,
+        decay=args.model_ema_decay
+    )
+    return model
 
 if __name__ == '__main__':
     opts, ds_init = get_args()

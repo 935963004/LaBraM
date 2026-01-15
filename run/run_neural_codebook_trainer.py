@@ -22,13 +22,13 @@ from pathlib import Path
 from timm.models import create_model
 
 from utils import dist_utils
-from data import eeg_datasets
+from data import patch_datasets
 from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
 
 from train.train_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
-from models.vqnsp import VQNSP
+from models.vqnsp_model import VQNSP
 
 
 def get_args():
@@ -116,7 +116,6 @@ def get_args():
 
 
 def get_visual_tokenizer(args, **kwargs) -> VQNSP:
-       
     model = create_model(
         args.model,
         pretrained=False,
@@ -159,7 +158,7 @@ def main(args):
         4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
         8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
+    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
 
     datasets_val = [
         ["path/to/datasets_val"]
@@ -167,7 +166,7 @@ def main(args):
     if args.disable_eval:
         dataset_val_list = None
     else:
-        dataset_val_list, val_ch_names_list = eeg_datasets.build_pretraining_dataset(datasets_val, [4])
+        dataset_val_list, val_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_val, [4])
 
     if True:  # args.distributed:
         num_tasks = dist_utils.get_world_size()

@@ -1,12 +1,12 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import torch
 from einops import rearrange
 from timm.layers import trunc_normal_
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from codebook_embedding import NormEMAVectorQuantizer
-from neural_transformer import NeuralTransformer
+from models.codebook_embedding import NormEMAVectorQuantizer
+from models.neural_transformer import NeuralTransformer
 
 
 class VQNSP(nn.Module):
@@ -34,8 +34,12 @@ class VQNSP(nn.Module):
         print('Final decoder config', decoder_config)
         self.decoder = NeuralTransformer(**decoder_config)
 
-        self.quantize = NormEMAVectorQuantizer(
-            n_embed=n_embed, embedding_dim=embed_dim, beta=1.0, kmeans_init=quantize_kmeans_init, decay=decay,
+        self.quantizer = NormEMAVectorQuantizer(
+            n_embed=n_embed,
+            embedding_dim=embed_dim,
+            beta=1.0,
+            kmeans_init=quantize_kmeans_init,
+            decay=decay,
         )
 
         self.patch_size = encoder_config['patch_size']
@@ -69,39 +73,22 @@ class VQNSP(nn.Module):
 
         self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
+    def forward(self, x: Tensor, input_chans: List[str] = None, **kwargs):
+        """
+        x: shape [B, N, T]
+        """
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'quantize.embedding.weight', 'decoder.cls_token', 'decoder.pos_embed', 'decoder.time_embed',
-                'encoder.cls_token', 'encoder.pos_embed', 'encoder.time_embed'}
+        x = rearrange(x, 'B N (A T) -> B N A T', T=200)
 
-    @property
-    def device(self):
-        return self.decoder.cls_token.device
+        encoder_out = self.encode(x, input_chans)
 
-    def get_number_of_tokens(self):
-        return self.quantize.n_e
+        # predict amplitude and phase from quantized tokens
+        recon_amplitude, recon_phase = self.decode(encoder_out['quantize_tokens'], input_chans)
+        recon_out = {'recon_amplitude': recon_amplitude,
+                     'recon_phase': recon_phase}
+        return recon_out, encoder_out
 
-    def get_tokens(self, data, input_chans=None, **kwargs)-> Dict[str, torch.Tensor]:
-        encoder_out = self.encode(data, input_chans=input_chans)
-        quantize_tokens = encoder_out['quantize_tokens']
-        codebook_ind = encoder_out['codebook_ind']
-        loss = encoder_out['quantize_loss']
-        output = {'token': codebook_ind.view(data.shape[0], -1),
-                  'input_img': data,
-                  'quantize': rearrange(quantize_tokens, 'b d a c -> b (a c) d'),
-                  'loss': loss}
-        return output
-
-    def encode(self, x: Tensor, input_chans: List[str]=None):
+    def encode(self, x: Tensor, input_chans: List[str] = None):
         """
         Encodes the input EEG data and processes it through an encoder and quantization module.
 
@@ -130,35 +117,69 @@ class VQNSP(nn.Module):
         """
         batch_size, n_channels, n_samples, times = x.shape
         encoder_out = self.encoder(x, input_chans)
-        #  output = {'pred_class': pred_class,
-        #                   'patch_tokens': patch_tokens,
-        #                   'cls_token': cls_token}
         encoder_features = encoder_out['patch_tokens']  # b, num_patches, embed_dim
-        codebook_ind, quantize_loss, quantize_tokens = self.quantize_enc_features(encoder_features, n_channels)
+        codebook_ind, quantize_loss, quantize_tokens = self.quantize_enc_features(encoder_features,
+                                                                                  n_channels)
         encoder_out['quantize_tokens'] = quantize_tokens
         encoder_out['codebook_ind'] = codebook_ind
         encoder_out['quantize_loss'] = quantize_loss
         return encoder_out
 
-    def quantize_enc_features(self, encoder_features: torch.Tensor, n_channels: int) -> tuple[Tensor, Tensor, Tensor]:
+    def quantize_enc_features(self, encoder_features: Tensor, n_channels: int) -> tuple[Tensor, Tensor, Tensor]:
+
+        # embedding into quantization space
         with torch.amp.autocast('cuda'):
             quantizer_features = self.encode_task_layer(encoder_features.type_as(self.encode_task_layer[-1].weight))
 
-        quantizer_ch = quantizer_features.shape[1] // n_channels
+        n_patches = quantizer_features.shape[1] // n_channels  # n_patches
 
-        quantizer_features = rearrange(quantizer_features, 'b (h w) c -> b c h w', h=n_channels,
-                                       w=quantizer_ch)  # reshape for quantizer
-        quantize_tokens, quantize_loss, codebook_ind = self.quantize(quantizer_features)
-        return codebook_ind, quantize_loss, quantize_tokens
+        # reshape for quantizer: (batch, codebook_dim, n_channels, n_patches)
+        quantizer_features = rearrange(quantizer_features,
+                                       'b (h w) c -> b c h w',
+                                       h=n_channels,
+                                       w=n_patches)
 
-    def decode(self, quantize, input_chans=None, **kwargs) -> tuple[Tensor, Tensor]:
+        # apply quantization
+        quantize_tokens, quantize_error, codebook_ind = self.quantizer(quantizer_features)
+        return codebook_ind, quantize_error, quantize_tokens
+
+    def decode(self, quantize_patches: Tensor, input_chans: List[str] = None, **kwargs) -> Tuple[Tensor, Tensor]:
         # reshape tokens to feature maps for patch embed in decoder
         # quantize = rearrange(quantize, 'b (h w) c -> b c h w', h=self.token_shape[0], w=self.token_shape[1])
-        decoder_out = self.decoder(quantize, input_chans)
+        decoder_out = self.decoder(quantize_patches, input_chans)
         decoder_features = decoder_out['patch_tokens']
         recon_amplitude = self.decode_task_layer(decoder_features)
         recon_angle = self.decode_task_layer_angle(decoder_features)
         return recon_amplitude, recon_angle
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'quantize.embedding.weight', 'decoder.cls_token', 'decoder.pos_embed', 'decoder.time_embed',
+                'encoder.cls_token', 'encoder.pos_embed', 'encoder.time_embed'}
+
+    @property
+    def device(self):
+        return self.decoder.cls_token.device
+
+    def get_tokens(self, data: Tensor, input_chans: List[str] = None, **kwargs) -> Dict[str, Tensor]:
+        encoder_out = self.encode(data, input_chans=input_chans)
+        quantize_tokens = encoder_out['quantize_tokens']
+        codebook_ind = encoder_out['codebook_ind']
+        loss = encoder_out['quantize_loss']
+        output = {'token': codebook_ind.view(data.shape[0], -1),
+                  'input_img': data,
+                  'quantize': rearrange(quantize_tokens, 'b d a c -> b (a c) d'),
+                  'loss': loss}
+        return output
 
     def get_codebook_indices(self, x, input_chans=None, **kwargs):
         # for LaBraM pre-training
@@ -169,44 +190,4 @@ class VQNSP(nn.Module):
         rec_loss = self.loss_fn(rec, target)
         return rec_loss
 
-    def std_norm(self, x):
-        mean = torch.mean(x, dim=(1, 2, 3), keepdim=True)
-        std = torch.std(x, dim=(1, 2, 3), keepdim=True)
-        x = (x - mean) / std
-        return x
 
-    def forward(self, x: Tensor, input_chans: List[str]=None, **kwargs):
-        """
-        x: shape [B, N, T]
-        """
-
-        x = rearrange(x, 'B N (A T) -> B N A T', T=200)
-
-        encoder_out = self.encode(x, input_chans)
-        quantize_tokens = encoder_out['quantize_tokens']
-        quantize_loss = encoder_out['quantize_loss']
-
-        recon_amplitude, recon_phase = self.decode(quantize_tokens, input_chans)
-
-        rec_amplitude_loss, rec_phase_loss = self.get_spectral_recon_losses(x, recon_amplitude, recon_phase)
-
-        total_loss = quantize_loss + rec_amplitude_loss + rec_phase_loss
-
-        log = {}
-        split="train" if self.training else "val"
-        log[f'{split}/quant_loss'] = quantize_loss.detach().mean()
-        log[f'{split}/rec_loss'] = rec_amplitude_loss.detach().mean()
-        log[f'{split}/rec_angle_loss'] = rec_phase_loss.detach().mean()
-        log[f'{split}/total_loss'] = total_loss.detach().mean()
-
-        return total_loss, log
-
-    def get_spectral_recon_losses(self, x: Tensor,  recon_amplitude: Tensor, recon_phase: Tensor) -> tuple[Tensor, Tensor]:
-        x_fft = torch.fft.fft(x, dim=-1)
-        amplitude = torch.abs(x_fft)
-        amplitude = self.std_norm(amplitude)
-        phase = torch.angle(x_fft)
-        phase = self.std_norm(phase)
-        rec_amplitude_loss = self.calculate_rec_loss(recon_amplitude, amplitude)
-        rec_phase_loss = self.calculate_rec_loss(recon_phase, phase)
-        return rec_amplitude_loss, rec_phase_loss

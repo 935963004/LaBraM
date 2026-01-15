@@ -13,10 +13,7 @@ import torch
 import torch.nn as nn
 from timm.models.registry import register_model
 
-from mask_modeling import NeuralTransformerForMEM
-
-
-# from modeling_utils import _cfg
+from models.masked_neural_transformer import NeuralTransformerForMEM
 
 
 @register_model

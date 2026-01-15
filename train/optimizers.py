@@ -285,3 +285,8 @@ def _get_num_layer_for_vit(var_name: str, num_max_layer: int) -> int:
         return layer_id + 1
     else:
         return num_max_layer - 1
+
+
+def get_loss_scale_for_deepspeed(model) -> float:
+    optimizer = model.optimizer
+    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale

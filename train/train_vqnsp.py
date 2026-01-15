@@ -14,33 +14,34 @@ from typing import Iterable
 
 import torch
 
-import logers
 from data import eeg_consts
-from models.vqnsp import VQNSP
-from training_utils import SmoothedValue
+from models.vqnsp_model import VQNSP
+from train.logers import MetricLogger, SmoothedValue
 from utils import dist_utils
+from train.losses import SpectralPatchedLoss
 
 
 def train_one_epoch(model: VQNSP,
                     data_loader_list: Iterable,
                     optimizer: torch.optim.Optimizer,
-                            device: torch.device, 
-                            epoch: int, 
-                            loss_scaler, 
-                            clip_grad: float = 0,
-                            log_writer=None, 
-                            lr_scheduler=None, 
-                            start_steps=None,
-                            lr_schedule_values=None,
-                            ch_names_list=None,
-                            args=None,
-                            ):
+                    device: torch.device,
+                    epoch: int,
+                    loss_scaler,
+                    clip_grad: float = 0,
+                    log_writer=None,
+                    lr_scheduler=None,
+                    start_steps=None,
+                    lr_schedule_values=None,
+                    ch_names_list=None,
+                    args=None):
     model.train()
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
+
+    recon_loss = SpectralPatchedLoss()
         
     if hasattr(model.module, 'quantize'):
         try:
@@ -61,9 +62,20 @@ def train_one_epoch(model: VQNSP,
             batch = batch.float().to(device, non_blocking=True) / 100
 
             with torch.amp.autocast(device):
-                loss, log_loss = model(batch, input_chans=input_chans)
+                recon_out, encoder_out = model(batch, input_chans=input_chans)
+                quantize_loss = encoder_out['quantize_loss']
+                recon_amplitude = recon_out['recon_amplitude']
+                recon_phase = recon_out['recon_phase']
+                rec_amplitude_loss, rec_phase_loss = recon_loss(recon_amplitude, recon_phase)
+                total_loss = rec_amplitude_loss + rec_phase_loss + quantize_loss
+            loss_value = total_loss.item()
 
-            loss_value = loss.item()
+            log_loss = {}
+            split = "train" if model.training else "val"
+            log_loss[f'{split}/quant_loss'] = quantize_loss.detach().mean()
+            log_loss[f'{split}/rec_loss'] = rec_amplitude_loss.detach().mean()
+            log_loss[f'{split}/rec_angle_loss'] = rec_phase_loss.detach().mean()
+            log_loss[f'{split}/total_loss'] = total_loss.detach().mean()
 
             if not math.isfinite(loss_value):
                 print("Loss is {}, stopping training".format(loss_value), force=True)
@@ -74,7 +86,7 @@ def train_one_epoch(model: VQNSP,
             optimizer.zero_grad()
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            grad_norm = loss_scaler(loss, optimizer, clip_grad=clip_grad,
+            grad_norm = loss_scaler(total_loss, optimizer, clip_grad=clip_grad,
                                     parameters=model.parameters(), create_graph=is_second_order)
             loss_scale_value = loss_scaler.state_dict()["scale"]
             
@@ -133,7 +145,7 @@ def train_one_epoch(model: VQNSP,
 
 @torch.no_grad()
 def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_names_list=None, args=None):
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     header = 'Validation:'
 
     # switch to evaluation mode
@@ -141,7 +153,7 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
 
     if hasattr(model.module, 'quantize'):
         try:
-            model.module.quantize.reset_cluster_size(device)
+            model.module.quantizer.reset_cluster_size(device)
             print("Reset the codebook statistic info in quantizer before testing")
         except:
             pass
@@ -165,9 +177,9 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
     # stat the codebook usage information
     if hasattr(model, 'module') and hasattr(model.module, 'quantize'):
         try:
-            codebook_cluster_size = model.module.quantize._codebook.cluster_size
+            codebook_cluster_size = model.module.quantizer._codebook.cluster_size
         except:
-            codebook_cluster_size = model.module.quantize.cluster_size
+            codebook_cluster_size = model.module.quantizer.cluster_size
         zero_cnt = (codebook_cluster_size == 0).sum().item()
         test_stat = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
         test_stat['unused_code'] = zero_cnt
@@ -178,7 +190,7 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
 
 @torch.no_grad()
 def calculate_codebook_usage(data_loader, model, device, log_writer=None, epoch=None, args=None):
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     header = 'Calculating codebook usage:'
 
     # switch to evaluation mode

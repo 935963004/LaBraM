@@ -17,16 +17,17 @@ from timm.utils import ModelEma
 from torch import nn, Tensor
 from tqdm import tqdm
 
-import evaluation
-import logers
-import training_utils
+from train.evaluation import get_metrics
+from train.logers import MetricLogger
+from train.optimizers import get_loss_scale_for_deepspeed
+from train.training_utils import SmoothedValue
 from data import eeg_consts
 from models.neural_transformer import NeuralTransformer
-from models.vqnsp import VQNSP
-
+from models.vqnsp_model import VQNSP
+from train.losses import SpectralPatchedLoss
 
 def train_class_batch(pred_model: NeuralTransformer,
-                      vqnsp_model: Optional[VQNSP],
+                      vqnsp_model: VQNSP,
                       samples: Tensor,
                       target: Tensor,
                       criterion: nn.Module,
@@ -35,12 +36,13 @@ def train_class_batch(pred_model: NeuralTransformer,
     out_pred = pred_model.forward(samples, ch_names)
     patch_tokens = out_pred['patch_tokens']
     pred_class = out_pred['pred_class']
-
+    recon_spec_loss = SpectralPatchedLoss()
     if vqnsp_model is not None:
         codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
                                                                                          n_channels)
-        recon_amplitude, recon_angle = vqnsp_model.decode(quantize_tokens)
-        rec_amplitude_loss, rec_phase_loss = vqnsp_model.get_spectral_recon_losses(samples, recon_amplitude, recon_angle, ch_names)
+        recon_amplitude, recon_angle = vqnsp_model.decode(quantize_tokens, ch_names)
+
+        rec_amplitude_loss, rec_phase_loss = recon_spec_loss(samples, recon_amplitude, recon_angle)
     else:
         quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
     loss_finetune_class = criterion(pred_class, target)
@@ -53,11 +55,6 @@ def train_class_batch(pred_model: NeuralTransformer,
             "rec_phase_loss": rec_phase_loss}
 
     return losses, pred_class
-
-
-def get_loss_scale_for_deepspeed(model) -> float:
-    optimizer = model.optimizer
-    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
 
 
 def train_one_epoch(transformer_model: torch.nn.Module,
@@ -84,9 +81,9 @@ def train_one_epoch(transformer_model: torch.nn.Module,
     if ch_names is not None:
         input_chans = eeg_consts.get_input_chans(ch_names)
     transformer_model.train(True)
-    metric_logger = logers.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', training_utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('min_lr', training_utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger = MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('min_lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
@@ -169,7 +166,7 @@ def train_one_epoch(transformer_model: torch.nn.Module,
             raise Exception(f"Invalid device: device={device}")
 
         if is_binary:
-            class_acc = evaluation.get_metrics(torch.sigmoid(output).detach().cpu().float().numpy(),
+            class_acc = get_metrics(torch.sigmoid(output).detach().cpu().float().numpy(),
                                                targets.detach().cpu().float().numpy(), ["accuracy"], is_binary)[
                 "accuracy"]
         else:
@@ -233,7 +230,7 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
-    metric_logger = logers.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     #header = 'Test:'
 
     # switch to evaluation mode
@@ -263,7 +260,7 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
             pred_class = pred_class.cpu()
         target = target.cpu()
 
-        results = evaluation.get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
+        results = get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
         pred.append(pred_class)
         true.append(target)
 
@@ -280,6 +277,6 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
     pred = torch.cat(pred, dim=0).numpy()
     true = torch.cat(true, dim=0).numpy()
 
-    ret = evaluation.get_metrics(pred, true, metrics, is_binary, 0.5)
+    ret = get_metrics(pred, true, metrics, is_binary, 0.5)
     ret['loss'] = metric_logger.loss.global_avg
     return ret
