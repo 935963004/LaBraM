@@ -5,7 +5,10 @@ from torch import Tensor
 import torch.nn.functional as F
 
 class SpectralPatchedLoss(nn.Module):
-    def __init__(self, smooth_l1_loss = False):
+    def __init__(self,
+                 smooth_l1_loss = False # Flag to use SmoothL1Loss instead of MSELoss.
+                 ):
+        """Spectral loss for patch-based EEG models"""
         super().__init__()
         self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
 

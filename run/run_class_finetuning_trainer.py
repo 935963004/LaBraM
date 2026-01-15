@@ -563,8 +563,7 @@ def main(args, ds_init):
             num_training_steps_per_epoch=num_training_steps_per_epoch,
             update_freq=args.update_freq,
             ch_names=ch_names,
-            is_binary=args.nb_classes == 1,
-            use_cls_token=use_cls_token
+            is_binary=args.nb_classes == 1
         )
         print(f"Epoch {epoch} training finished.")
         if args.output_dir and args.save_ckpt:
