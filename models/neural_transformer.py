@@ -108,33 +108,32 @@ class NeuralTransformer(nn.Module):
             self.head.weight.data.mul_(init_scale)
             self.head.bias.data.mul_(init_scale)
 
-    def fix_init_weight(self):
-        def rescale(param, layer_id):
-            param.div_(math.sqrt(2.0 * layer_id))
+    def forward(self,
+                x: Tensor,
+                input_chans: List[str] = None,
+                **kwargs) -> Dict[str, Tensor]:
+        """
+        x: [batch size, number of electrodes, number of patches, patch size]
+        For example, for an EEG sample of 4 seconds with 64 electrodes, x will be [batch size, 64, 4, 200]
+        """
+        x = self.forward_features(x,
+                                  input_chans=input_chans,
+                                  # return_patch_tokens=return_patch_tokens,
+                                  # return_all_tokens=return_all_tokens,
+                                  **kwargs)
+        patch_tokens = x[:, 1:]
+        cls_token = x[:, 0]
 
-        for layer_id, layer in enumerate(self.blocks):
-            rescale(layer.attn.proj.weight.data, layer_id + 1)
-            rescale(layer.mlp.fc2.weight.data, layer_id + 1)
+        if self.use_mean_pooling:
+            features_pred = patch_tokens.mean(1)
+        else:
+            features_pred = cls_token
+        pred_class = self.head(features_pred)
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    def get_num_layers(self):
-        return len(self.blocks)
-
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'pos_embed', 'cls_token', 'time_embed'}
-
-    def reset_classifier(self, num_classes, global_pool=''):
-        self.num_classes = num_classes
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        output = {'pred_class': pred_class,
+                  'patch_tokens': patch_tokens,
+                  'cls_token': cls_token}
+        return output
 
     def forward_features(self,
                          x: Tensor,
@@ -169,32 +168,35 @@ class NeuralTransformer(nn.Module):
 
         return self.norm(x)
 
-    def forward(self,
-                x: Tensor,
-                input_chans: List[str] = None,
-                **kwargs) -> Dict[str, Tensor]:
-        """
-        x: [batch size, number of electrodes, number of patches, patch size]
-        For example, for an EEG sample of 4 seconds with 64 electrodes, x will be [batch size, 64, 4, 200]
-        """
-        x = self.forward_features(x,
-                                  input_chans=input_chans,
-                                  # return_patch_tokens=return_patch_tokens,
-                                  # return_all_tokens=return_all_tokens,
-                                  **kwargs)
-        patch_tokens = x[:, 1:]
-        cls_token = x[:, 0]
+    def fix_init_weight(self):
+        def rescale(param, layer_id):
+            param.div_(math.sqrt(2.0 * layer_id))
 
-        if self.use_mean_pooling:
-            features_pred = patch_tokens.mean(1)
-        else:
-            features_pred = cls_token
-        pred_class = self.head(features_pred)
+        for layer_id, layer in enumerate(self.blocks):
+            rescale(layer.attn.proj.weight.data, layer_id + 1)
+            rescale(layer.mlp.fc2.weight.data, layer_id + 1)
 
-        output = {'pred_class': pred_class,
-                  'patch_tokens': patch_tokens,
-                  'cls_token': cls_token}
-        return output
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def get_num_layers(self):
+        return len(self.blocks)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'pos_embed', 'cls_token', 'time_embed'}
+
+    def reset_classifier(self, num_classes, global_pool=''):
+        self.num_classes = num_classes
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+
 
     def get_intermediate_layers(self, x, use_last_norm=False):
         x = self.patch_embed(x)

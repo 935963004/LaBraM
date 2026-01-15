@@ -5,8 +5,6 @@ import numpy as np
 import os
 import pickle
 from warnings import warn
-from sklearn.frozen.tests.test_frozen import regression_dataset
-from torch.utils.hipify.hipify_python import meta_data
 from tqdm import tqdm
 from functools import partial
 from multiprocessing import Pool

@@ -9,10 +9,10 @@
 # ---------------------------------------------------------
 from functools import partial
 import torch
-from timm.models.registry import register_model
 from torch import nn
+from timm.models.registry import register_model
 
-from models.vqnsp import VQNSP
+from models.vqnsp_model import VQNSP
 
 
 @register_model

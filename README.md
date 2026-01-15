@@ -61,7 +61,7 @@ You may also implement your own preprocessing pipeline, but please ensure it mat
 The tokenizer is trained via **vector-quantized neural spectrum prediction (VQ-NSP)**. We recommend training on **8 × NVIDIA RTX 3090 (or better)** GPUs.
 
 ```bash
-OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_vqnsp_trainer.py \
+OMP_NUM_THREADS=1 torchrun --nnodes=1 --nproc_per_node=8 run_neural_codebook_trainer.py \
     --output_dir ./checkpoints/vqnsp/ \
     --log_dir ./log/vqnsp/ \
     --model vqnsp_encoder_base_decoder_3x200x12 \

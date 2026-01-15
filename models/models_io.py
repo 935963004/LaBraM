@@ -8,16 +8,6 @@ from timm.utils import get_state_dict
 from utils.dist_utils import save_on_master
 
 
-def _load_checkpoint_for_ema(model_ema, checkpoint):
-    """
-    Workaround for ModelEma._load_checkpoint to accept an already-loaded object
-    """
-    mem_file = io.BytesIO()
-    torch.save(checkpoint, mem_file)
-    mem_file.seek(0)
-    model_ema._load_checkpoint(mem_file)
-
-
 def load_state_dict(model, state_dict, prefix='', ignore_missing="relative_position_index"):
     missing_keys = []
     unexpected_keys = []
@@ -160,3 +150,12 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
                 if model_ema is not None:
                     if args.model_ema:
                         _load_checkpoint_for_ema(model_ema, client_states['model_ema'])
+
+def _load_checkpoint_for_ema(model_ema, checkpoint):
+    """
+    Workaround for ModelEma._load_checkpoint to accept an already-loaded object
+    """
+    mem_file = io.BytesIO()
+    torch.save(checkpoint, mem_file)
+    mem_file.seek(0)
+    model_ema._load_checkpoint(mem_file)

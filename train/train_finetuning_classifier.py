@@ -19,14 +19,15 @@ from tqdm import tqdm
 
 from train.evaluation import get_metrics
 from train.logers import MetricLogger
-from  train.training_utils import SmoothedValue
+from train.optimizers import get_loss_scale_for_deepspeed
+from train.training_utils import SmoothedValue
 from data import eeg_consts
 from models.neural_transformer import NeuralTransformer
-from models.vqnsp import VQNSP
-
+from models.vqnsp_model import VQNSP
+from train.losses import SpectralPatchedLoss
 
 def train_class_batch(pred_model: NeuralTransformer,
-                      vqnsp_model: Optional[VQNSP],
+                      vqnsp_model: VQNSP,
                       samples: Tensor,
                       target: Tensor,
                       criterion: nn.Module,
@@ -35,12 +36,13 @@ def train_class_batch(pred_model: NeuralTransformer,
     out_pred = pred_model.forward(samples, ch_names)
     patch_tokens = out_pred['patch_tokens']
     pred_class = out_pred['pred_class']
-
+    recon_spec_loss = SpectralPatchedLoss()
     if vqnsp_model is not None:
         codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
                                                                                          n_channels)
         recon_amplitude, recon_angle = vqnsp_model.decode(quantize_tokens, ch_names)
-        rec_amplitude_loss, rec_phase_loss = vqnsp_model.get_spectral_recon_losses(samples, recon_amplitude, recon_angle)
+
+        rec_amplitude_loss, rec_phase_loss = recon_spec_loss(samples, recon_amplitude, recon_angle)
     else:
         quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
     loss_finetune_class = criterion(pred_class, target)
@@ -53,11 +55,6 @@ def train_class_batch(pred_model: NeuralTransformer,
             "rec_phase_loss": rec_phase_loss}
 
     return losses, pred_class
-
-
-def get_loss_scale_for_deepspeed(model) -> float:
-    optimizer = model.optimizer
-    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
 
 
 def train_one_epoch(transformer_model: torch.nn.Module,
