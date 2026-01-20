@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 from pathlib import Path
@@ -182,7 +183,7 @@ def all_gather_batch_with_grad(tensors):
     return output_tensor
 
 
-def create_ds_config(args):
+def create_ds_config(args: argparse.Namespace):
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     with open(os.path.join(args.output_dir, "latest"), mode="w") as f:
         pass

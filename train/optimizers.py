@@ -13,6 +13,7 @@ from math import inf
 
 import numpy as np
 import torch
+import torch.nn as nn
 from timm.optim import NAdam
 from timm.optim import RAdam
 from timm.optim.adafactor import Adafactor
@@ -94,7 +95,7 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
     return list(parameter_group_vars.values())
 
 
-def create_optimizer(args, model, get_num_layer=None, get_layer_scale=None, filter_bias_and_bn=True, skip_list=None, **kwargs):
+def create_optimizer(args, model: nn.Module, get_num_layer=None, get_layer_scale=None, filter_bias_and_bn=True, skip_list=None, **kwargs):
     opt_lower = args.opt.lower()
     weight_decay = args.weight_decay
     if weight_decay and filter_bias_and_bn:

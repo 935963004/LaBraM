@@ -17,8 +17,7 @@ from data import eeg_consts
 from models.vqnsp_model import VQNSP
 from train.logers import MetricLogger, SmoothedValue
 from utils import dist_utils
-from train.losses import SpectralPatchedLoss
-
+from train.losses import SpectralPatchedLoss, get_vqnsp_losses
 
 def train_one_epoch(model: VQNSP,
                     data_loader_list: Iterable,
@@ -40,8 +39,6 @@ def train_one_epoch(model: VQNSP,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
-    recon_loss = SpectralPatchedLoss()
-        
     if hasattr(model.module, 'quantize'):
         try:
             model.module.quantize.reset_cluster_size(device)
@@ -61,38 +58,33 @@ def train_one_epoch(model: VQNSP,
             batch = batch.float().to(device, non_blocking=True) / 100
 
             with torch.amp.autocast(device):
-                recon_out, encoder_out = model(batch, input_chans=input_chans)
-                quantize_loss = encoder_out['quantize_loss']
-                recon_amplitude = recon_out['recon_amplitude']
-                recon_phase = recon_out['recon_phase']
-                rec_amplitude_loss, rec_phase_loss = recon_loss(recon_amplitude, recon_phase)
-                total_loss = rec_amplitude_loss + rec_phase_loss + quantize_loss
-            loss_value = total_loss.item()
+                decoder_out, encoder_out = model(batch, input_chans=input_chans)
+                losses_out= get_vqnsp_losses(decoder_out, encoder_out)
 
-            log_loss = {}
-            split = "train" if model.training else "val"
-            log_loss[f'{split}/quant_loss'] = quantize_loss.detach().mean()
-            log_loss[f'{split}/rec_loss'] = rec_amplitude_loss.detach().mean()
-            log_loss[f'{split}/rec_angle_loss'] = rec_phase_loss.detach().mean()
-            log_loss[f'{split}/total_loss'] = total_loss.detach().mean()
-
+            loss_value = losses_out["total_loss"].item()
             if not math.isfinite(loss_value):
                 print("Loss is {}, stopping training".format(loss_value), force=True)
                 raise NotImplementedError
                 # utils.save_nan_model(args, model)
                 sys.exit(1)
 
+
+            split = "train" if model.training else "val"
+            log_loss = {f'{split}/{name}':  val.detach().mean() for name, val in losses_out.items()}
+
             optimizer.zero_grad()
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            grad_norm = loss_scaler(total_loss, optimizer, clip_grad=clip_grad,
-                                    parameters=model.parameters(), create_graph=is_second_order)
+            grad_norm = loss_scaler(losses_out["total_loss"],
+                                    optimizer,
+                                    clip_grad=clip_grad,
+                                    parameters=model.parameters(),
+                                    create_graph=is_second_order)
             loss_scale_value = loss_scaler.state_dict()["scale"]
             
             torch.cuda.synchronize()
 
             metric_logger.update(loss=loss_value)
-            
             new_log_loss = {k.split('/')[-1]:v for k, v in log_loss.items() if k not in ['total_loss']}
             metric_logger.update(**new_log_loss)
 
@@ -142,8 +134,15 @@ def train_one_epoch(model: VQNSP,
         return train_stat
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
 @torch.no_grad()
-def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_names_list=None, args=None):
+def evaluate(data_loader_list,
+             model: VQNSP,
+             device,
+             log_writer=None,
+             epoch=None,
+             ch_names_list=None,
+             args=None):
     metric_logger = MetricLogger(delimiter="  ")
     header = 'Validation:'
 
@@ -162,11 +161,11 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
         for step, (batch) in enumerate(metric_logger.log_every(data_loader, 10, header)):
 
             images = batch.float().to(device, non_blocking=True) / 100
-            loss, log_loss = model(images, input_chans=input_chans)
+            recon_out, encoder_out = model(images, input_chans=input_chans)
+            loses_out = get_vqnsp_losses(recon_out, encoder_out)
+            metric_logger.update(loss=loses_out["total_loss"].item())
 
-            metric_logger.update(loss=loss.item())
-
-            new_log_loss = {k.split('/')[-1]:v for k, v in log_loss.items() if k not in ['total_loss']}
+            new_log_loss = {k.split('/')[-1]:v.detach().mean() for k, v in loses_out.items() if k not in ['total_loss']}
         metric_logger.update(**new_log_loss)
 
     # gather the stats from all processes
@@ -174,6 +173,7 @@ def evaluate(data_loader_list, model, device, log_writer=None, epoch=None, ch_na
     print("Averaged stats:", metric_logger)
 
     # stat the codebook usage information
+    ## TODO: refactoring required
     if hasattr(model, 'module') and hasattr(model.module, 'quantize'):
         try:
             codebook_cluster_size = model.module.quantizer._codebook.cluster_size

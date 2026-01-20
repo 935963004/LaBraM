@@ -5,7 +5,7 @@ from torch import nn as nn
 from torch import Tensor
 
 from layers.attention_blocks import Block
-from layers.patch_embedding import TemporalConv
+from layers.patch_conv_blocks import TemporalConv
 
 
 class NeuralTransformerForMaskedEEGModeling(nn.Module):

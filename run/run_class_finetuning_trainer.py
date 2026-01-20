@@ -10,6 +10,9 @@
 
 import argparse
 import datetime
+from argparse import Namespace
+from typing import Any, OrderedDict, Dict, List, Tuple
+
 import numpy as np
 import time
 import torch
@@ -28,13 +31,17 @@ from models import models_io
 from train import optimizers, logers
 from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayValueAssigner, \
     NativeScalerWithGradNormCount as NativeScaler
+from train.losses import SpectralPatchedLoss
 
 from train.train_finetuning_classifier import train_one_epoch, evaluate_classifier
 
 from models.neural_transformer import NeuralTransformer
 from models.vqnsp_model import VQNSP
-import  models.factory_finetune_classiffers
-import models.factory_vqnsp
+from models.classifier_model import NeurolCodebookClassifier, FeaturesTypes
+
+
+import  models.registry_finetune_classifiers
+import models.registry_vqnsp_models
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -76,17 +83,24 @@ def get_args():
     parser.add_argument('--model_ema', action='store_true', default=False)
     parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
     parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
+
+    #classifer parameters
     parser.add_argument('--classifier_type', default='linear', type=str, metavar='CLASSIFIER_HEAD',
                         help='Type of classification head to use linear/MLP(3 layers) (default: "linear")')
+    parser.add_argument('--nb_classes', default=0, type=int,
+                        help='number of the classification types')
+    parser.add_argument('--features_classif_dim', default=120, type=int,
+                        help='dimension of the embedding features for classification head')
+
 
     # tokenizer settings
-    parser.add_argument("--use_tokenizer", action="store_true", help="Use tokenizer or not.")
+    # parser.add_argument("--use_tokenizer", action="store_true", help="Use tokenizer or not.")
     parser.add_argument("--tokenizer_weight", type=str, help="Path to tokenizer weight")
     parser.add_argument("--tokenizer_model", type=str, default="vqnsp_encoder_base_decoder_3x200x12")
 
     # Tokenizer parameters
     parser.add_argument('--codebook_size', default=8192, type=int, help='number of codebook')
-    parser.add_argument('--codebook_dim', default=32, type=int, help='number of codebook')
+    parser.add_argument('--codebook_dim', default=64, type=int, help='number of codebook')
 
     # Optimizer parameters
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -133,7 +147,7 @@ def get_args():
                         help='Do not random erase first (clean) augmentation split')
 
     # * Finetuning params
-    parser.add_argument('--use_cls', action='store_true', help='use mean pooling or cls token', default=False)
+    # parser.add_argument('--use_cls', action='store_true', help='use mean pooling or cls token', default=False)
     # parser.set_defaults(use_cls=True)
     parser.add_argument('--finetune', default='',
                         help='finetune from checkpoint')
@@ -147,8 +161,7 @@ def get_args():
     parser.add_argument('--disable_weight_decay_on_rel_pos_bias', action='store_true')
 
     # Dataset parameters
-    parser.add_argument('--nb_classes', default=0, type=int,
-                        help='number of the classification types')
+
 
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -210,80 +223,8 @@ def get_args():
 
     return parser.parse_args(), ds_init
 
-def get_encoder_models(args) ->NeuralTransformer:
-    use_mem_pooling = args.use_mean_pooling if not args.use_cls else False
-    model = create_model(
-        args.model,
-        pretrained=False,
-        num_classes=args.nb_classes,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        attn_drop_rate=args.attn_drop_rate,
-        drop_block_rate=None,
-        use_mean_pooling=use_mem_pooling,
-        init_scale=args.init_scale,
-        use_rel_pos_bias=args.rel_pos_bias,
-        use_abs_pos_emb=args.abs_pos_emb,
-        init_values=args.layer_scale_init_value,
-        qkv_bias=args.qkv_bias,
-        classifier_type=args.classifier_type)
 
-
-    return model
-
-
-def get_dataset(args):
-    if args.dataset == 'TUAB':
-        dataset_dir = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(dataset_dir)
-        ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
-                    'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
-        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
-        args.nb_classes = 1
-        metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy"]
-    elif args.dataset == 'TUEV':
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUEV_dataset("path/to/TUEV")
-        ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
-                    'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
-        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
-        args.nb_classes = 6
-        metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-    elif args.dataset == 'HMC':
-        ch_names= ['EEG F4-M1', 'EEG C4-M1', 'EEG O2-M1', 'EEG C3-M2']
-        args.nb_classes = 5
-        metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-        dataset_dir = Path("/Users/leon/Data/neurolm_downstream", 'HMC')
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_HMC_dataset(dataset_dir)
-        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
-    elif args.dataset == 'INTERNAL':
-        args.nb_classes = 1 #3
-        is_normal_abnormal = False
-        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec")
-        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv")
-        # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
-        label_names = ['is_control', 'is_lesion']
-        ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
-                 'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
-        # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
-        # - f1: f1
-        # score
-        # - precision: precision
-        # score
-        # - recall: recall
-        # score
-        metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy", "f1", "recall", "precision"] # binary classification
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_internal_dataset(root_path=dataset_dir,
-                                                                                         seed=args.seed,
-                                                                                         is_normal_abnormal=is_normal_abnormal,
-                                                                                         class_labels=label_names,
-                                                                                         metadata_csv_path=metadata_path)
-    else:
-        raise ValueError("Unknown dataset: %s" % args.dataset)
-
-    return train_dataset, test_dataset, val_dataset, ch_names, metrics
-
-
-def main(args, ds_init):
+def main(args: argparse.Namespace, ds_init):
     dist_utils.init_distributed_mode(args)
 
     if ds_init is not None:
@@ -378,71 +319,29 @@ def main(args, ds_init):
         data_loader_val = None
         data_loader_test = None
 
-    encoder_model = get_encoder_models(args)
-    vqnsp_model = get_visual_tokenizer(args)
+    classifier_model = build_classifier_model(args, device)
 
-    patch_size = encoder_model.patch_size
+    patch_size = classifier_model.patch_size
     print("Patch size = %s" % str(patch_size))
     args.window_size = (1, args.input_size // patch_size)
     args.patch_size = patch_size
 
-    if args.finetune:
-        if args.finetune.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location=device, check_hash=True)
-        else:
-            checkpoint = torch.load(args.finetune, map_location=device, weights_only=False)
+    # encoder_model.to(device)
+    # if vqnsp_model is not None:
+    #     vqnsp_model.to(device)
 
-        print("Load ckpt from %s" % args.finetune)
-        checkpoint_model = None
-        for model_key in args.model_key.split('|'):
-            if model_key in checkpoint:
-                checkpoint_model = checkpoint[model_key]
-                print("Load state_dict by model_key = %s" % model_key)
-                break
-        if checkpoint_model is None:
-            checkpoint_model = checkpoint
-        if (checkpoint_model is not None) and (args.model_filter_name != ''):
-            all_keys = list(checkpoint_model.keys())
-            new_dict = OrderedDict()
-            for key in all_keys:
-                if key.startswith('student.'):
-                    new_dict[key[8:]] = checkpoint_model[key]
-                else:
-                    pass
-            checkpoint_model = new_dict
-
-        state_dict = encoder_model.state_dict()
-        for k in ['head.weight', 'head.bias']:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-
-        all_keys = list(checkpoint_model.keys())
-        for key in all_keys:
-            if "relative_position_index" in key:
-                checkpoint_model.pop(key)
-        # redundant norm layer from legacy model
-        checkpoint_model = {k.replace(".fc_norm.", ".norm."): v for k, v in checkpoint_model.items()}
-
-        models_io.load_state_dict(encoder_model, checkpoint_model, prefix=args.model_prefix)
-
-    encoder_model.to(device)
-    if vqnsp_model is not None:
-        vqnsp_model.to(device)
-
-    model_ema = None
+    model_encoder_ema = None
     if args.model_ema:
         # Important to create EMA encoder_model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
-        model_ema = ModelEma(
-            encoder_model,
+        model_encoder_ema = ModelEma(
+            classifier_model.encoder,
             decay=args.model_ema_decay,
             device='cpu' if args.model_ema_force_cpu else '',
             resume='')
         print("Using EMA with decay = %.8f" % args.model_ema_decay)
 
-    model_without_ddp = encoder_model
-    n_parameters = sum(p.numel() for p in encoder_model.parameters() if p.requires_grad)
+    model_without_ddp = classifier_model
+    n_parameters = sum(p.numel() for p in classifier_model.parameters() if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
@@ -454,19 +353,19 @@ def main(args, ds_init):
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(dataset_train))
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
-    use_cls_token = args.use_cls
-    print("Use cls token = %s" % str(use_cls_token))
-    print("Use tokenizer: %s" % str(args.use_tokenizer))
-    num_layers = model_without_ddp.get_num_layers()
+    # print("Use cls token = %s" % str(use_cls_token))
+    # print("Use tokenizer: %s" % str(args.use_tokenizer))
+    num_layers = model_without_ddp.encoder.get_num_layers()
     if args.layer_decay < 1.0:
-        assigner = LayerDecayValueAssigner(list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)))
+        assigner = LayerDecayValueAssigner(
+            list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)))
     else:
         assigner = None
 
     if assigner is not None:
         print("Assigned values = %s" % str(assigner.values))
 
-    skip_weight_decay_list = encoder_model.no_weight_decay()
+    skip_weight_decay_list = classifier_model.no_weight_decay()
     if args.disable_weight_decay_on_rel_pos_bias:
         for i in range(num_layers):
             skip_weight_decay_list.add("blocks.%d.attn.relative_position_bias_table" % i)
@@ -474,28 +373,34 @@ def main(args, ds_init):
     if args.enable_deepspeed:
         loss_scaler = None
         optimizer_params = get_parameter_groups(
-            encoder_model, args.weight_decay, skip_weight_decay_list,
+            classifier_model, args.weight_decay, skip_weight_decay_list,
             assigner.get_layer_id if assigner is not None else None,
             assigner.get_scale if assigner is not None else None)
-        encoder_model, optimizer, _, _ = ds_init(
-            args=args, model=encoder_model, model_parameters=optimizer_params, dist_init_required=not args.distributed,
+        classifier_model, optimizer, _, _ = ds_init(
+            args=args,
+            model=classifier_model,
+            model_parameters=optimizer_params,
+            dist_init_required=not args.distributed,
         )
 
-        print("encoder_model.gradient_accumulation_steps() = %d" % encoder_model.gradient_accumulation_steps())
-        assert encoder_model.gradient_accumulation_steps() == args.update_freq
+        print("encoder_model.gradient_accumulation_steps() = %d" % classifier_model.gradient_accumulation_steps())
+        assert classifier_model.gradient_accumulation_steps() == args.update_freq
     else:
         if args.distributed:
-            encoder_model = torch.nn.parallel.DistributedDataParallel(encoder_model, device_ids=[args.gpu], find_unused_parameters=True)
-            model_without_ddp = encoder_model.module
+            classifier_model = torch.nn.parallel.DistributedDataParallel(classifier_model, device_ids=[args.gpu],
+                                                                      find_unused_parameters=True)
+            model_without_ddp = classifier_model.module
 
-        blocks_filter = [f"blocks.{i}." for i in range(num_layers-2)]
-        filter_opt =  ["cls_token", "embed"] + blocks_filter
+        blocks_filter = [f"encoder.blocks.{i}." for i in range(num_layers - 2)]
+        filter_opt = ["cls_token", "patch_embed", "pos_embed", "time_embed", "quantizer", "decoder",
+                      "encode_task_layer", "decode_task_layer"] +\
+                     blocks_filter
         optimizer = create_optimizer(
             args, model_without_ddp,
             skip_list=skip_weight_decay_list,
-            get_num_layer=assigner.get_layer_id if assigner is not None else None, 
+            get_num_layer=assigner.get_layer_id if assigner is not None else None,
             get_layer_scale=assigner.get_scale if assigner is not None else None,
-           filter_name=filter_opt
+            filter_name=filter_opt
         )
         loss_scaler = NativeScaler()
 
@@ -511,33 +416,38 @@ def main(args, ds_init):
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
     if args.nb_classes == 1:
-        criterion = torch.nn.BCEWithLogitsLoss()
+        classifier_loss = torch.nn.BCEWithLogitsLoss()
     elif args.smoothing > 0.:
-        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+        classifier_loss = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
-        criterion = torch.nn.CrossEntropyLoss()
+        classifier_loss = torch.nn.CrossEntropyLoss()
 
-    print("criterion = %s" % str(criterion))
+    recon_loss= SpectralPatchedLoss()
+
+    print("classifier_loss = %s" % str(classifier_loss))
 
     models_io.auto_load_model(
-        args=args, model=encoder_model, model_without_ddp=model_without_ddp,
-        optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
-            
+        args=args, model=classifier_model, model_without_ddp=model_without_ddp,
+        optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_encoder_ema)
+
     if args.eval:
         print("Start evaluating for starting...")
         balanced_accuracy = []
         accuracy = []
         if type(dataset_test) == list:
             for data_loader in data_loader_test:
-                test_stats = evaluate_classifier(data_loader, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=(args.nb_classes == 1))
+                test_stats = evaluate_classifier(data_loader, classifier_model, device, header='Test:', ch_names=ch_names,
+                                                 metrics=metrics, is_binary=(args.nb_classes == 1))
                 accuracy.append(test_stats['accuracy'])
                 balanced_accuracy.append(test_stats['balanced_accuracy'])
         else:
-            test_stats = evaluate_classifier(data_loader_test, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics,
+            test_stats = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
+                                             metrics=metrics,
                                              is_binary=(args.nb_classes == 1))
             accuracy.append(test_stats['accuracy'])
             balanced_accuracy.append(test_stats['balanced_accuracy'])
-        print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
+        print(
+            f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
@@ -552,10 +462,17 @@ def main(args, ds_init):
             log_writer.writer.add_text('tarin', f"EPOCH {epoch}", global_step=epoch)
         print(f"Epoch {epoch} starting ...")
 
-        train_stats =   train_one_epoch(
-            encoder_model, vqnsp_model, criterion, data_loader_train, optimizer,
-            device, epoch, loss_scaler, args.clip_grad,
-            transformer_model_ema=model_ema,
+        train_stats = train_one_epoch(
+            classify_model=classifier_model,
+            classifier_loss=classifier_loss,
+            recon_loss=recon_loss,
+            data_loader=data_loader_train,
+            optimizer=optimizer,
+            device=device,
+            epoch=epoch,
+            loss_scaler=loss_scaler,
+            max_norm=args.clip_grad,
+            encoder_model_ema=model_encoder_ema,
             log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values,
@@ -568,21 +485,23 @@ def main(args, ds_init):
         print(f"Epoch {epoch} training finished.")
         if args.output_dir and args.save_ckpt:
             models_io.save_model(
-                args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema, save_ckpt_freq=args.save_ckpt_freq)
-            
+                args=args, model=classifier_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                loss_scaler=loss_scaler, epoch=epoch, model_ema=model_encoder_ema, save_ckpt_freq=args.save_ckpt_freq)
+
         if data_loader_val is not None:
-            val_stats = evaluate_classifier(data_loader_val, encoder_model, device, header='Val:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            val_stats = evaluate_classifier(data_loader_val, classifier_model, device, header='Val:', ch_names=ch_names,
+                                            metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_stats['accuracy']:.2f}%")
-            test_stats = evaluate_classifier(data_loader_test, encoder_model, device, header='Test:', ch_names=ch_names, metrics=metrics, is_binary=args.nb_classes == 1)
+            test_stats = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
+                                             metrics=metrics, is_binary=args.nb_classes == 1)
             print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_stats['accuracy']:.2f}%")
-            
+
             if max_accuracy < val_stats["accuracy"]:
                 max_accuracy = val_stats["accuracy"]
                 if args.output_dir and args.save_ckpt:
                     models_io.save_model(
-                        args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                        loss_scaler=loss_scaler, epoch="best", model_ema=model_ema)
+                        args=args, model=classifier_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                        loss_scaler=loss_scaler, epoch="best", model_ema=model_encoder_ema)
                 max_accuracy_test = test_stats["accuracy"]
 
             print(f'Max accuracy val: {max_accuracy:.2f}%, max accuracy test: {max_accuracy_test:.2f}%')
@@ -602,6 +521,8 @@ def main(args, ds_init):
                         log_writer.update(cohen_kappa=value, head="val", step=epoch)
                     elif key == 'loss':
                         log_writer.update(loss=value, head="val", step=epoch)
+                    else:
+                        log_writer.update(**{key: value}, head="val", step=epoch)
                 for key, value in test_stats.items():
                     if key == 'accuracy':
                         log_writer.update(accuracy=value, head="test", step=epoch)
@@ -617,7 +538,9 @@ def main(args, ds_init):
                         log_writer.update(cohen_kappa=value, head="test", step=epoch)
                     elif key == 'loss':
                         log_writer.update(loss=value, head="test", step=epoch)
-                
+                    else:
+                        log_writer.update(**{key: value}, head="test", step=epoch)
+
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'val_{k}': v for k, v in val_stats.items()},
                          **{f'test_{k}': v for k, v in test_stats.items()},
@@ -638,18 +561,167 @@ def main(args, ds_init):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
+
+def build_classifier_model(args: Namespace, device: torch.device) -> NeurolCodebookClassifier:
+    encoder_model = get_encoder_models(args)
+    vqnsp_model = get_visual_tokenizer(args)
+    ckpt_encoder_path = args.finetune
+    if ckpt_encoder_path:
+        if not os.path.isfile(ckpt_encoder_path):
+            raise FileNotFoundError(f"Checkpoint of encoder {ckpt_encoder_path} not found!")
+        loaded_ckpt_encoder = load_encoder_ckpt(ckpt_path=ckpt_encoder_path,
+                                                model_key=args.model_key,
+                                                model_filter_name=args.model_filter_name,
+                                                device_name=device)
+        loaded_ckpt_encoder = preproc_ckpt_encode(encoder_model.state_dict(), loaded_ckpt_encoder)
+        models_io.load_state_dict(encoder_model, loaded_ckpt_encoder, prefix=args.model_prefix)
+
+    feature_space = [FeaturesTypes.CLS_TOKEN.value, FeaturesTypes.BAG_OF_CODES.value]
+    classifier_model = NeurolCodebookClassifier(encoder_model=encoder_model,
+                                                vqnsp_model=vqnsp_model,
+                                                num_classes=args.nb_classes,
+                                                classifier_type=args.classifier_type,
+                                                features_emb_dim=args.features_classif_dim,
+                                                feature_space= feature_space)
+    classifier_model.to(device)
+    return classifier_model
+
+
+def preproc_ckpt_encode(encoder_state_dict: OrderedDict[str, Any], loaded_ckpt_encoder: OrderedDict) -> Dict[Any, Any]:
+    for k in ['head.weight', 'head.bias']:
+        if k in loaded_ckpt_encoder and loaded_ckpt_encoder[k].shape != encoder_state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del loaded_ckpt_encoder[k]
+
+    all_keys = list(loaded_ckpt_encoder.keys())
+    for key in all_keys:
+        if "relative_position_index" in key:
+            loaded_ckpt_encoder.pop(key)
+    # redundant norm layer from legacy model
+    loaded_ckpt_encoder = {k.replace(".fc_norm.", ".norm."): v for k, v in loaded_ckpt_encoder.items()}
+    return loaded_ckpt_encoder
+
+
+def load_encoder_ckpt(ckpt_path: str,
+                      model_filter_name: str ="gzp",
+                      model_key: str ="model|module",
+                      device_name: torch.device =torch.device("cpu")) -> OrderedDict:
+    if ckpt_path.startswith('https'):
+        checkpoint = torch.hub.load_state_dict_from_url(
+            ckpt_path, map_location=device_name, check_hash=True)
+    else:
+        checkpoint = torch.load(ckpt_path, map_location=device_name, weights_only=False)
+
+    print("Loaded ckpt from %s" % ckpt_path)
+    checkpoint_model = None
+    for model_key_ in model_key.split('|'):
+        if model_key_ in checkpoint:
+            checkpoint_model = checkpoint[model_key_]
+            print("Load state_dict by model_key = %s" % model_key_)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    if (checkpoint_model is not None) and (model_filter_name != ''):
+        all_keys = list(checkpoint_model.keys())
+        new_dict = OrderedDict()
+        for key in all_keys:
+            if key.startswith('student.'):
+                new_dict[key[8:]] = checkpoint_model[key]
+            else:
+                pass
+        checkpoint_model = new_dict
+    return checkpoint_model
+
+
+def get_encoder_models(args) ->NeuralTransformer:
+    # use_mem_pooling = args.use_mean_pooling if not args.use_cls else False
+    model = create_model(
+        args.model,
+        pretrained=False,
+        num_classes=0, #args.nb_classes,
+        drop_rate=args.drop,
+        drop_path_rate=args.drop_path,
+        attn_drop_rate=args.attn_drop_rate,
+        drop_block_rate=None,
+        # use_mean_pooling=use_mem_pooling,
+        init_scale=args.init_scale,
+        use_rel_pos_bias=args.rel_pos_bias,
+        use_abs_pos_emb=args.abs_pos_emb,
+        init_values=args.layer_scale_init_value,
+        qkv_bias=args.qkv_bias,
+        classifier_type=args.classifier_type)
+
+
+    return model
+
 def get_visual_tokenizer(args, **kwargs) -> VQNSP:
 
     model = create_model(
         args.tokenizer_model,
-        pretrained=False,
-        as_tokenzer=False,
+        pretrained=True,
+        pretrained_weight=args.tokenizer_weight,
+        as_tokenzer=True,
         n_code=args.codebook_size,
         code_dim=args.codebook_dim,
-        EEG_size=args.input_size,
-        decay=args.model_ema_decay
     )
     return model
+
+def get_dataset(args):
+    if args.dataset == 'TUAB':
+        dataset_dir = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(dataset_dir)
+        ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
+                    'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
+        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
+        args.nb_classes = 1
+        metrics = ["pr_auc", "roc_auc", "accuracy", "balanced_accuracy"]
+    elif args.dataset == 'TUEV':
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUEV_dataset("path/to/TUEV")
+        ch_names = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF', 'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
+                    'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
+        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
+        args.nb_classes = 6
+        metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
+    elif args.dataset == 'HMC':
+        ch_names= ['EEG F4-M1', 'EEG C4-M1', 'EEG O2-M1', 'EEG C3-M2']
+        args.nb_classes = 5
+        metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
+        dataset_dir = Path("/Users/leon/Data/neurolm_downstream", 'HMC')
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_HMC_dataset(dataset_dir)
+        ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
+    elif args.dataset == 'INTERNAL':
+        args.nb_classes = 1 #3
+        is_normal_abnormal = False
+        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec")
+        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv")
+        # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+        label_names = ['is_control', 'is_lesion']
+        ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
+                 'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
+        # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
+        # - f1: f1
+        # score
+        # - precision: precision
+        # score
+        # - recall: recall
+        # score
+        metrics = ["pr_auc",
+                   "roc_auc",
+                   "accuracy",
+                   "balanced_accuracy",
+                   "f1",
+                   "recall",
+                   "precision"] # binary classification
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_internal_dataset(root_path=dataset_dir,
+                                                                                         seed=args.seed,
+                                                                                         is_normal_abnormal=is_normal_abnormal,
+                                                                                         class_labels=label_names,
+                                                                                         metadata_csv_path=metadata_path)
+    else:
+        raise ValueError("Unknown dataset: %s" % args.dataset)
+
+    return train_dataset, test_dataset, val_dataset, ch_names, metrics
+
 
 if __name__ == '__main__':
     opts, ds_init = get_args()

@@ -1,12 +1,12 @@
 import math
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 import torch
 from timm.layers import trunc_normal_
 from torch import nn as nn, Tensor
 
 from layers.attention_blocks import Block
 from layers.mlp_blocks import MlpClassifier
-from layers.patch_embedding import TemporalConv, PatchEmbed
+from layers.patch_conv_blocks import TemporalConv, PatchEmbed
 
 
 class NeuralTransformer(nn.Module):
@@ -189,7 +189,7 @@ class NeuralTransformer(nn.Module):
         return len(self.blocks)
 
     @torch.jit.ignore
-    def no_weight_decay(self):
+    def no_weight_decay(self) -> Set[str]:
         return {'pos_embed', 'cls_token', 'time_embed'}
 
     def reset_classifier(self, num_classes, global_pool=''):
