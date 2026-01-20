@@ -1,7 +1,9 @@
+from typing import Dict, Optional, Tuple
+
 from einops import rearrange
 import torch
 import torch.nn as nn
-from torch import Tensor
+from torch import Tensor, nn as nn
 import torch.nn.functional as F
 
 class SpectralPatchedLoss(nn.Module):
@@ -12,7 +14,7 @@ class SpectralPatchedLoss(nn.Module):
         super().__init__()
         self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
 
-    def forward(self, x_target: Tensor, recon_magnitude: Tensor, recon_phase: Tensor):
+    def forward(self, x_target: Tensor, recon_magnitude: Tensor, recon_phase: Tensor)-> Tuple[Tensor, Tensor]:
         """Computes spectral loss from magnitude and phase"""
         x_fft = torch.fft.fft(x_target, dim=-1)
         target_amplitude = _std_norm(torch.abs(x_fft))
@@ -31,3 +33,23 @@ def _std_norm(x):
     std = torch.std(x, dim=(1, 2, 3), keepdim=True)
     x = (x - mean) / std
     return x
+
+
+def get_vqnsp_losses(x_target: Tensor,
+                     decoder_out: Dict[str, Tensor],
+                     encoder_out: Dict[str, Tensor],
+                     recon_loss: Optional[nn.Module] = None) -> Dict[str, Tensor]:
+    if recon_loss is None:
+        recon_loss = SpectralPatchedLoss()
+    quantize_loss = encoder_out['quantize_loss']
+    recon_amplitude = decoder_out['recon_amplitude']
+    recon_phase = decoder_out['recon_phase']
+    rec_amplitude_loss, rec_phase_loss = recon_loss(x_target=x_target,
+                                                    recon_magnitude=recon_amplitude,
+                                                    recon_phase=recon_phase)
+    total_loss = rec_amplitude_loss + 0.1*rec_phase_loss + quantize_loss
+    losses_out = {"total_loss": total_loss,
+                  "rec_amplitude_loss": rec_amplitude_loss,
+                  "rec_phase_loss": rec_phase_loss,
+                  "quantize_loss": quantize_loss}
+    return losses_out
