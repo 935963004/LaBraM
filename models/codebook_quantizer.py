@@ -17,8 +17,16 @@ from einops import rearrange, repeat
 
 
 class NormEMAVectorQuantizer(nn.Module):
-    def __init__(self, n_embed, embedding_dim, beta, decay=0.99, eps=1e-5,
-                 statistic_code_usage=True, kmeans_init=False, codebook_init_path=''):
+    def __init__(self,
+                 n_embed: int=8192,
+                 embedding_dim: int=32,
+                 beta: float = 1.0,
+                 decay: float = 0.99,
+                 eps: float = 1e-5,
+                 statistic_code_usage: bool = True,
+                 kmeans_init: bool = False,
+                 codebook_init_path: str = '',
+                 update_codebook: bool = True):
         super().__init__()
         self.codebook_dim = embedding_dim
         self.num_tokens = n_embed
@@ -26,8 +34,13 @@ class NormEMAVectorQuantizer(nn.Module):
         self.decay = decay
 
         # learnable = True if orthogonal_reg_weight > 0 else False
-        self.embedder = EmbeddingEMA(self.num_tokens, self.codebook_dim, decay, eps, kmeans_init, codebook_init_path)
-
+        self.embedder = EmbeddingEMA(self.num_tokens,
+                                     self.codebook_dim,
+                                     decay,
+                                     eps,
+                                     kmeans_init,
+                                     codebook_init_path)
+        self.embedder.update = update_codebook
         self.statistic_code_usage = statistic_code_usage
         if statistic_code_usage:
             self.register_buffer('cluster_size', torch.zeros(n_embed))
@@ -67,30 +80,32 @@ class NormEMAVectorQuantizer(nn.Module):
         z_quantized = self.embedder(encoding_indices).view(z.shape)
 
         # one-hot encoding of the encoding indices into a codebook
-        encodings = F.one_hot(encoding_indices, self.num_tokens).type(z.dtype)
-
+        encodings_onehot = F.one_hot(encoding_indices, self.num_tokens).type(z.dtype)
+        encoding_bins = encodings_onehot.mean(1)
+        encoding_indices = encoding_indices.view(z.shape[:-1])
+        encoding_bins=encoding_bins.view(z.shape[:-1])
         if not self.training:
             with torch.no_grad():
-                cluster_size = encodings.sum(0)
+                cluster_size = encodings_onehot.sum(0)
                 self.all_reduce_fn(cluster_size)
                 ema_inplace(self.cluster_size, cluster_size, self.decay)
 
         if self.training and self.embedder.update:
             # EMA cluster size
 
-            bins = encodings.sum(0)
-            self.all_reduce_fn(bins)
+            batch_bins = encodings_onehot.sum(0)
+            self.all_reduce_fn(batch_bins)
 
             # self.embedding.cluster_size_ema_update(bins)
-            ema_inplace(self.cluster_size, bins, self.decay)
+            ema_inplace(self.cluster_size, batch_bins, self.decay)
 
-            zero_mask = (bins == 0)
-            bins = bins.masked_fill(zero_mask, 1.)
+            zero_mask = (batch_bins == 0)
+            batch_bins = batch_bins.masked_fill(zero_mask, 1.)
 
-            embed_sum = z_flattened.t() @ encodings
+            embed_sum = z_flattened.t() @ encodings_onehot
             self.all_reduce_fn(embed_sum)
 
-            embed_normalized = (embed_sum / bins.unsqueeze(0)).t()
+            embed_normalized = (embed_sum / batch_bins.unsqueeze(0)).t()
             embed_normalized = l2norm(embed_normalized)
 
             embed_normalized = torch.where(zero_mask[..., None], self.embedder.weight,
@@ -107,7 +122,7 @@ class NormEMAVectorQuantizer(nn.Module):
         # reshape back to match the original input shape
         # z_quantized, 'b h w c -> b c h w'
         z_quantized = rearrange(z_quantized, 'b h w c -> b c h w')
-        return z_quantized, quantize_err, encoding_indices
+        return z_quantized, quantize_err, encoding_indices, encoding_bins
 
     def reset_cluster_size(self, device):
         if self.statistic_code_usage:
