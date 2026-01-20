@@ -55,7 +55,14 @@ def vqnsp_encoder_base_decoder_3x200x12(pretrained=False, pretrained_weight=None
             if k.startswith("loss") or k.startswith("teacher") or k.startswith("scaling"):
                 del weights[k]
 
-        weights = {k.replace(".fc_norm.", ".norm."): v for k, v in weights.items()}
+        def replace_names(key_):
+            key_ = key_.replace(".fc_norm.", ".norm.")
+            key_ = key_.replace('quantize.', "quantizer.")
+            key_ = key_.replace('.embedding.', ".embedder.")
+            return key_
+
+        weights = {replace_names(k): v for k, v in weights.items()}
+
         model.load_state_dict(weights)
     return model
 
