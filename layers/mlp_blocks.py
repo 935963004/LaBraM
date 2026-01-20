@@ -1,14 +1,16 @@
+from typing import Callable
 from timm.layers import trunc_normal_
 from torch import nn as nn
 
 
 class MlpClassifier(nn.Module):
-    def __init__(self, in_features,
-                 act_layer=nn.GELU,
-                 num_classes=1,
-                 depth=3,
-                 drop=0.,
-                 layer_ratio=0.5):
+    def __init__(self,
+                 in_features: int,
+                 act_layer: Callable = nn.GELU,
+                 num_classes: int = 1,
+                 depth: int = 3,
+                 drop: float =0.,
+                 layer_ratio: float=0.5):
         """Initializes MLP classifier with fully connected blocks"""
         super().__init__()
         self.blocks_fc = []
@@ -61,3 +63,4 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
