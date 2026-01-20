@@ -24,49 +24,43 @@ from train.training_utils import SmoothedValue
 from data import eeg_consts
 from models.neural_transformer import NeuralTransformer
 from models.vqnsp_model import VQNSP
-from train.losses import SpectralPatchedLoss
+from models.classifier_model import NeurolCodebookClassifier
+from train.losses import get_vqnsp_losses, SpectralPatchedLoss
 
-def train_class_batch(pred_model: NeuralTransformer,
-                      vqnsp_model: VQNSP,
+def train_class_batch(classify_model: NeurolCodebookClassifier,
+                      # encode_model: NeuralTransformer,
+                      # vqnsp_model: VQNSP,
                       samples: Tensor,
                       target: Tensor,
-                      criterion: nn.Module,
+                      classif_loss: nn.Module,
+                      recon_loss: nn.Module,
                       ch_names: List[str]) -> tuple[Dict[str, Tensor], Tensor]:
     batch_size, n_channels, n_samples, times = samples.shape
-    out_pred = pred_model.forward(samples, ch_names)
-    patch_tokens = out_pred['patch_tokens']
-    pred_class = out_pred['pred_class']
-    recon_spec_loss = SpectralPatchedLoss()
-    if vqnsp_model is not None:
-        codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
-                                                                                         n_channels)
-        recon_amplitude, recon_angle = vqnsp_model.decode(quantize_tokens, ch_names)
+    pred_class, decoder_out, encoder_out = classify_model(samples, ch_names)
+    loss_finetune_class = classif_loss(pred_class, target)
+    losses_vqnsp = get_vqnsp_losses(x_target=samples,
+                                    decoder_out=decoder_out,
+                                    encoder_out=encoder_out,
+                                    recon_loss=recon_loss)
 
-        rec_amplitude_loss, rec_phase_loss = recon_spec_loss(samples, recon_amplitude, recon_angle)
-    else:
-        quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
-    loss_finetune_class = criterion(pred_class, target)
-
-    loss_total = loss_finetune_class + quantize_loss + rec_amplitude_loss + 0.1*rec_phase_loss
-    losses = {"loss_total": loss_total,
-            "loss_finetune_class": loss_finetune_class,
-            "quantize_loss": quantize_loss,
-            "rec_amplitude_loss": rec_amplitude_loss ,
-            "rec_phase_loss": rec_phase_loss}
+    loss_total = loss_finetune_class + losses_vqnsp['total_loss']
+    losses = losses_vqnsp
+    losses["total_loss"] = loss_total
+    losses["loss_class"] = loss_finetune_class
 
     return losses, pred_class
 
 
-def train_one_epoch(transformer_model: torch.nn.Module,
-                    vqnsp_model: Optional[VQNSP],
-                    criterion: torch.nn.Module,
+def train_one_epoch(classify_model: NeurolCodebookClassifier,
+                    classifier_loss: torch.nn.Module,
+                    recon_loss: torch.nn.Module,
                     data_loader: torch.utils.data.DataLoader,
                     optimizer: torch.optim.Optimizer,
                     device: torch.device,
                     epoch: int,
                     loss_scaler,
                     max_norm: float = 0,
-                    transformer_model_ema: Optional[ModelEma] = None,
+                    encoder_model_ema: Optional[ModelEma] = None,
                     log_writer=None,
                     start_steps=None,
                     lr_schedule_values=None,
@@ -79,7 +73,7 @@ def train_one_epoch(transformer_model: torch.nn.Module,
     input_chans = None
     if ch_names is not None:
         input_chans = eeg_consts.get_input_chans(ch_names)
-    transformer_model.train(True)
+    classify_model.train(True, wo_codebook=True)
     metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -87,8 +81,8 @@ def train_one_epoch(transformer_model: torch.nn.Module,
     print_freq = 10
 
     if loss_scaler is None:
-        transformer_model.zero_grad()
-        transformer_model.micro_steps = 0
+        classify_model.zero_grad()
+        classify_model.micro_steps = 0
     else:
         optimizer.zero_grad()
 
@@ -115,13 +109,18 @@ def train_one_epoch(transformer_model: torch.nn.Module,
 
         if loss_scaler is None:
             samples = samples.half()
-            losses, output = train_class_batch(transformer_model, vqnsp_model, samples, targets, criterion, input_chans)
+            losses, output = train_class_batch(classify_model, samples, targets,
+                                               classif_loss=classifier_loss,
+                                               ch_names=input_chans,
+                                               recon_loss=recon_loss)
         else:
             with torch.amp.autocast(device_type=device.type):
-                losses, output = train_class_batch(transformer_model, vqnsp_model, samples, targets, criterion,
-                                                   input_chans)
+                losses, output = train_class_batch(classify_model, samples, targets,
+                                                   classif_loss=classifier_loss,
+                                                   ch_names=input_chans,
+                                                   recon_loss=recon_loss)
 
-        loss_total = losses["loss_total"]
+        loss_total = losses["total_loss"]
         loss_value = loss_total.item()
 
         if not math.isfinite(loss_value):
@@ -130,27 +129,27 @@ def train_one_epoch(transformer_model: torch.nn.Module,
 
         if loss_scaler is None:
             loss_total /= update_freq
-            transformer_model.backward(loss_total)
-            transformer_model.step()
+            classify_model.backward(loss_total)
+            classify_model.step()
 
             if (data_iter_step + 1) % update_freq == 0:
                 # model.zero_grad()
                 # Deepspeed will call step() & model.zero_grad() automatic
-                if transformer_model_ema is not None:
-                    transformer_model_ema.update(transformer_model)
+                if encoder_model_ema is not None:
+                    encoder_model_ema.update(classify_model.vqnsp_model.encoder)
             grad_norm = None
-            loss_scale_value = get_loss_scale_for_deepspeed(transformer_model)
+            loss_scale_value = get_loss_scale_for_deepspeed(classify_model)
         else:
             # this attribute is added by timm on one optimizer (adahessian)
             is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
             loss_total /= update_freq
             grad_norm = loss_scaler(loss_total, optimizer, clip_grad=max_norm,
-                                    parameters=transformer_model.parameters(), create_graph=is_second_order,
+                                    parameters=classify_model.parameters(), create_graph=is_second_order,
                                     update_grad=(data_iter_step + 1) % update_freq == 0)
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
-                if transformer_model_ema is not None:
-                    transformer_model_ema.update(transformer_model)
+                if encoder_model_ema is not None:
+                    encoder_model_ema.update(classify_model.vqnsp_model.encoder)
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         if device.type == 'cuda':
@@ -209,69 +208,83 @@ def train_one_epoch(transformer_model: torch.nn.Module,
 
 @torch.no_grad()
 def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
-                        model: torch.nn.Module,
+                        model: NeurolCodebookClassifier,
                         device: torch.device,
                         header: str = 'Test:',
                         ch_names: Optional[List[str]] = None,
                         metrics: Optional[List[str]] = None,
-                        is_binary=True):
+                        is_binary=True)-> Dict[str, float]:
     if metrics is None:
         metrics = ['acc']
     input_chans = None
     if ch_names is not None:
         input_chans = eeg_consts.get_input_chans(ch_names)
     if is_binary:
-        criterion = torch.nn.BCEWithLogitsLoss()
+        classif_loss = torch.nn.BCEWithLogitsLoss()
     else:
-        criterion = torch.nn.CrossEntropyLoss()
-
+        classif_loss = torch.nn.CrossEntropyLoss()
+    recon_loss = SpectralPatchedLoss()
+    recon_loss.to(device)
     metric_logger = MetricLogger(delimiter="  ")
     #header = 'Test:'
 
     # switch to evaluation mode
     model.eval()
-    pred = []
-    true = []
+    pred_label = []
+    true_label = []
     print(f"Run eval in mode {header}...")
     for step, batch in tqdm(enumerate(metric_logger.log_every(data_loader, 10, header)),
                             total=len(data_loader),
                             desc=f"Eval-{header}"):
-        EEG = batch[0]
-        target = batch[-1]
-        EEG = EEG.float().to(device, non_blocking=True) / 100
-        EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
-        target = target.to(device, non_blocking=True)
+        x_eeg = batch[0]
+        target_class = batch[-1]
+        x_eeg = x_eeg.float().to(device, non_blocking=True) / 100
+        x_eeg = rearrange(x_eeg, 'B N (A T) -> B N A T', T=200)
+        target_class = target_class.to(device, non_blocking=True)
         if is_binary:
-            target = target.float().unsqueeze(-1)
+            target_class = target_class.float().unsqueeze(-1)
         
         # compute output
         with torch.amp.autocast(device_type=device.type):
-            pred_class = model(EEG, input_chans=input_chans)['pred_class']
-            loss = criterion(pred_class, target)
-        
+            pred_out, decoder_out, encoder_out = model(x_eeg, input_chans=input_chans)
+            loss_classif = classif_loss(pred_out, target_class)
+            losses = get_vqnsp_losses(x_eeg, decoder_out, encoder_out, recon_loss)
+
+        # losses["total_loss"] = loss_total
+        losses["loss_class"] = loss_classif
+
         if is_binary:
-            pred_class = torch.sigmoid(pred_class).cpu()
+            pred_class = torch.sigmoid(pred_out).cpu()
         else:
             pred_class = pred_class.cpu()
-        target = target.cpu()
+        target_class = target_class.cpu()
 
-        results = get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
-        pred.append(pred_class)
-        true.append(target)
+        results = get_metrics(pred_class.numpy(), target_class.numpy(), metrics, is_binary)
+        pred_label.append(pred_class)
+        true_label.append(target_class)
 
-        batch_size = EEG.shape[0]
-        metric_logger.update(loss=loss.item())
+        batch_size = x_eeg.shape[0]
+        # metric_logger.update(loss=loss_classif.item())
         for key, value in results.items():
             metric_logger.meters[key].update(value, n=batch_size)
+
+        for key, loss_value in losses.items():
+            metric_logger.meters[key].update(loss_value.item())
+
         #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* loss {losses.global_avg:.3f}'
-          .format(losses=metric_logger.loss))
-    
-    pred = torch.cat(pred, dim=0).numpy()
-    true = torch.cat(true, dim=0).numpy()
+    for key, val in metric_logger.meters.items():
+        print(f"***{key}: {val.global_avg:.3f}***")
 
-    ret = get_metrics(pred, true, metrics, is_binary, 0.5)
-    ret['loss'] = metric_logger.loss.global_avg
-    return ret
+    
+    pred_label = torch.cat(pred_label, dim=0).numpy()
+    true_label = torch.cat(true_label, dim=0).numpy()
+
+    eval_metrics = get_metrics(pred_label, true_label, metrics, is_binary, 0.5)
+    # ret['loss'] = metric_logger.loss.global_avg
+
+    for key in losses.keys():
+        eval_metrics[key] = metric_logger.meters[key].global_avg
+
+    return eval_metrics
