@@ -24,7 +24,9 @@ from collections import OrderedDict
 from timm.models import create_model
 from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import ModelEma
+import pandas as pd
 
+from train.logers import TensorboardLogger
 from utils import dist_utils
 from data import patch_datasets
 from models import models_io
@@ -238,6 +240,10 @@ def main(args: argparse.Namespace, ds_init):
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
+    time_stamp = f"{time.strftime('%Y%m%d-%H%M%S')}"
+    run_name = f"{args.experiment}_{args.dataset}_{time_stamp}"
+    output_dir = Path(args.output_dir, run_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     cudnn.benchmark = True
 
@@ -293,7 +299,8 @@ def main(args: argparse.Namespace, ds_init):
 
     if dataset_val is not None:
         data_loader_val = torch.utils.data.DataLoader(
-            dataset_val, sampler=sampler_val,
+            dataset_val,
+            sampler=sampler_val,
             batch_size=int(1.5 * args.batch_size),
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
@@ -301,7 +308,8 @@ def main(args: argparse.Namespace, ds_init):
         )
         if type(dataset_test) == list:
             data_loader_test = [torch.utils.data.DataLoader(
-                dataset, sampler=sampler,
+                dataset,
+                sampler=sampler,
                 batch_size=int(1.5 * args.batch_size),
                 num_workers=args.num_workers,
                 pin_memory=args.pin_mem,
@@ -400,7 +408,7 @@ def main(args: argparse.Namespace, ds_init):
             skip_list=skip_weight_decay_list,
             get_num_layer=assigner.get_layer_id if assigner is not None else None,
             get_layer_scale=assigner.get_scale if assigner is not None else None,
-            filter_name=filter_opt
+            # filter_name=filter_opt
         )
         loss_scaler = NativeScaler()
 
@@ -434,20 +442,26 @@ def main(args: argparse.Namespace, ds_init):
         print("Start evaluating for starting...")
         balanced_accuracy = []
         accuracy = []
+
         if type(dataset_test) == list:
             for data_loader in data_loader_test:
-                test_stats = evaluate_classifier(data_loader, classifier_model, device, header='Test:', ch_names=ch_names,
+                test_metrics,  test_results_df, test_conf_matrix = evaluate_classifier(data_loader,
+                                                                           classifier_model,
+                                                                           device, header='Test:',
+                                                                           ch_names=ch_names,
                                                  metrics=metrics, is_binary=(args.nb_classes == 1))
-                accuracy.append(test_stats['accuracy'])
-                balanced_accuracy.append(test_stats['balanced_accuracy'])
+                accuracy.append(test_metrics['accuracy'])
+                balanced_accuracy.append(test_metrics['balanced_accuracy'])
         else:
-            test_stats = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
+            test_metrics, test_results_df, test_conf_matrix = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
                                              metrics=metrics,
                                              is_binary=(args.nb_classes == 1))
-            accuracy.append(test_stats['accuracy'])
-            balanced_accuracy.append(test_stats['balanced_accuracy'])
+            accuracy.append(test_metrics['accuracy'])
+            balanced_accuracy.append(test_metrics['balanced_accuracy'])
         print(
             f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
+
+        save_eval_results(test_conf_matrix, test_results_df, test_metrics, output_dir, mode='test')
         exit(0)
 
     print(f"Start training for {args.epochs} epochs")
@@ -483,67 +497,34 @@ def main(args: argparse.Namespace, ds_init):
             is_binary=args.nb_classes == 1
         )
         print(f"Epoch {epoch} training finished.")
-        if args.output_dir and args.save_ckpt:
-            models_io.save_model(
+        if output_dir and args.save_ckpt:
+            models_io.save_model(output_dir=output_dir,
                 args=args, model=classifier_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_encoder_ema, save_ckpt_freq=args.save_ckpt_freq)
 
         if data_loader_val is not None:
-            val_stats = evaluate_classifier(data_loader_val, classifier_model, device, header='Val:', ch_names=ch_names,
+            val_metrics, valid_results_df, valid_conf_matrix = evaluate_classifier(data_loader_val, classifier_model, device, header='Val:', ch_names=ch_names,
                                             metrics=metrics, is_binary=args.nb_classes == 1)
-            print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_stats['accuracy']:.2f}%")
-            test_stats = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
+            print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_metrics['accuracy']:.2f}%")
+            test_metrics, test_results_df, test_conf_matrix = evaluate_classifier(data_loader_test, classifier_model, device, header='Test:', ch_names=ch_names,
                                              metrics=metrics, is_binary=args.nb_classes == 1)
-            print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_stats['accuracy']:.2f}%")
+            print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_metrics['accuracy']:.2f}%")
 
-            if max_accuracy < val_stats["accuracy"]:
-                max_accuracy = val_stats["accuracy"]
-                if args.output_dir and args.save_ckpt:
-                    models_io.save_model(
+            if max_accuracy < val_metrics["accuracy"]:
+                max_accuracy = val_metrics["accuracy"]
+                if output_dir and args.save_ckpt:
+                    models_io.save_model(output_dir=output_dir,
                         args=args, model=classifier_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                         loss_scaler=loss_scaler, epoch="best", model_ema=model_encoder_ema)
-                max_accuracy_test = test_stats["accuracy"]
+                max_accuracy_test = test_metrics["accuracy"]
 
             print(f'Max accuracy val: {max_accuracy:.2f}%, max accuracy test: {max_accuracy_test:.2f}%')
             if log_writer is not None:
-                for key, value in val_stats.items():
-                    if key == 'accuracy':
-                        log_writer.update(accuracy=value, head="val", step=epoch)
-                    elif key == 'balanced_accuracy':
-                        log_writer.update(balanced_accuracy=value, head="val", step=epoch)
-                    elif key == 'f1_weighted':
-                        log_writer.update(f1_weighted=value, head="val", step=epoch)
-                    elif key == 'pr_auc':
-                        log_writer.update(pr_auc=value, head="val", step=epoch)
-                    elif key == 'roc_auc':
-                        log_writer.update(roc_auc=value, head="val", step=epoch)
-                    elif key == 'cohen_kappa':
-                        log_writer.update(cohen_kappa=value, head="val", step=epoch)
-                    elif key == 'loss':
-                        log_writer.update(loss=value, head="val", step=epoch)
-                    else:
-                        log_writer.update(**{key: value}, head="val", step=epoch)
-                for key, value in test_stats.items():
-                    if key == 'accuracy':
-                        log_writer.update(accuracy=value, head="test", step=epoch)
-                    elif key == 'balanced_accuracy':
-                        log_writer.update(balanced_accuracy=value, head="test", step=epoch)
-                    elif key == 'f1_weighted':
-                        log_writer.update(f1_weighted=value, head="test", step=epoch)
-                    elif key == 'pr_auc':
-                        log_writer.update(pr_auc=value, head="test", step=epoch)
-                    elif key == 'roc_auc':
-                        log_writer.update(roc_auc=value, head="test", step=epoch)
-                    elif key == 'cohen_kappa':
-                        log_writer.update(cohen_kappa=value, head="test", step=epoch)
-                    elif key == 'loss':
-                        log_writer.update(loss=value, head="test", step=epoch)
-                    else:
-                        log_writer.update(**{key: value}, head="test", step=epoch)
+                update_tb_logger(log_writer, val_metrics, test_metrics, epoch)
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'val_{k}': v for k, v in val_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
+                         **{f'val_{k}': v for k, v in val_metrics.items()},
+                         **{f'test_{k}': v for k, v in test_metrics.items()},
                          'epoch': epoch,
                          'n_parameters': n_parameters}
         else:
@@ -551,15 +532,77 @@ def main(args: argparse.Namespace, ds_init):
                          'epoch': epoch,
                          'n_parameters': n_parameters}
 
-        if args.output_dir and dist_utils.is_main_process():
+        if output_dir and dist_utils.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+            with open(Path(output_dir, f"log_epoch_{epoch}.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+            save_eval_results(test_conf_matrix, test_results_df, test_metrics,
+                              output_dir,
+                              mode='test', epoch=epoch)
+            save_eval_results(valid_conf_matrix, valid_results_df, val_metrics,
+                              output_dir,
+                              mode='valid', epoch=epoch)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+
+
+def save_eval_results(conf_matrix: np.ndarray,
+                      results_df: pd.DataFrame,
+                      stats_metrics: Dict[str, float],
+                      output_dir: Path,
+                      mode: str = 'test',
+                      epoch: int=0):
+    results_file = Path(output_dir, f'{mode}_results_epoch_{epoch}.csv')
+    results_df.to_csv(results_file, index=False)
+    conf_matrix_file = Path(output_dir, f'{mode}_conf_matrix_epoch_{epoch}.csv')
+    pd.DataFrame(conf_matrix).to_csv(conf_matrix_file, index=False)
+    stats_file = Path(output_dir, f'{mode}_stats_epoch_{epoch}.json')
+    try:
+        with open(stats_file, 'w') as json_file:
+            json.dump(stats_metrics, json_file, indent=4)
+    except Exception:
+        pass  # Silently ignore any exception
+
+
+def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats, epoch: int):
+    for key, value in val_stats.items():
+        if key == 'accuracy':
+            log_writer.update(accuracy=value, head="val", step=epoch)
+        elif key == 'balanced_accuracy':
+            log_writer.update(balanced_accuracy=value, head="val", step=epoch)
+        elif key == 'f1_weighted':
+            log_writer.update(f1_weighted=value, head="val", step=epoch)
+        elif key == 'pr_auc':
+            log_writer.update(pr_auc=value, head="val", step=epoch)
+        elif key == 'roc_auc':
+            log_writer.update(roc_auc=value, head="val", step=epoch)
+        elif key == 'cohen_kappa':
+            log_writer.update(cohen_kappa=value, head="val", step=epoch)
+        elif key == 'loss':
+            log_writer.update(loss=value, head="val", step=epoch)
+        else:
+            log_writer.update(**{key: value}, head="val", step=epoch)
+    for key, value in test_stats.items():
+        if key == 'accuracy':
+            log_writer.update(accuracy=value, head="test", step=epoch)
+        elif key == 'balanced_accuracy':
+            log_writer.update(balanced_accuracy=value, head="test", step=epoch)
+        elif key == 'f1_weighted':
+            log_writer.update(f1_weighted=value, head="test", step=epoch)
+        elif key == 'pr_auc':
+            log_writer.update(pr_auc=value, head="test", step=epoch)
+        elif key == 'roc_auc':
+            log_writer.update(roc_auc=value, head="test", step=epoch)
+        elif key == 'cohen_kappa':
+            log_writer.update(cohen_kappa=value, head="test", step=epoch)
+        elif key == 'loss':
+            log_writer.update(loss=value, head="test", step=epoch)
+        else:
+            log_writer.update(**{key: value}, head="test", step=epoch)
 
 
 def build_classifier_model(args: Namespace, device: torch.device) -> NeurolCodebookClassifier:

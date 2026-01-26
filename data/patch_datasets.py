@@ -2,7 +2,7 @@ import os
 import pickle
 from _warnings import warn
 from pathlib import Path
-from typing import List, Union, Optional, Tuple
+from typing import List, Union, Optional, Tuple, Dict
 
 import numpy as np
 import pandas as pd
@@ -143,8 +143,11 @@ class InternalDataset(Dataset):
             self.metadata_df = self.metadata_df[(self.metadata_df[class_labels].sum(1) == 1.0)]
 
         id_keys = list(map(lambda x: x.stem.split("_")[0], eeg_np_files))
+        id_interval = list(map(lambda x: x.stem.split("_")[1], eeg_np_files))
         ids_unique = np.unique(id_keys, return_counts=False)
-        self.eeg_files_df: pd.DataFrame = pd.DataFrame({"id_key": id_keys, "eeg_np_file": eeg_np_files}).set_index("id_key")
+        self.eeg_files_df: pd.DataFrame = pd.DataFrame({"id_key": id_keys,
+                                                        "eeg_np_file": eeg_np_files,
+                                                        "id_interval": id_interval}).set_index("id_key")
         self.metadata_df['id_key'] = self.metadata_df['filename_hashed'].apply(lambda x: x.split("_")[0])
         self.metadata_df = self.metadata_df.set_index("id_key")
         ids_common = self.metadata_df.index.intersection(ids_unique)
@@ -177,13 +180,12 @@ class InternalDataset(Dataset):
         file_ids = np.nonzero(self.eeg_files_df.index.isin(id_keys))[0]
         return torch.utils.data.Subset(self, file_ids)
 
-    def __getitem__(self, index: Union[int, List[int]]):
-        # ind_id = index if isinstance(index, int) else index[0]
-        # file_idn = self.metadata_df.iloc[ind_id].name
+    def __getitem__(self, index: Union[int, List[int]]) -> Dict[str, torch.Tensor]:
         file_info = self.eeg_files_df.iloc[index]
-        file_idn = file_info.name
+        id_key = file_info.name
+        id_interval = file_info['id_interval']
         file_eeg_path = file_info['eeg_np_file']
-        row_ind = self.metadata_df.loc[file_idn]
+        row_ind = self.metadata_df.loc[id_key]
         # file_eeg_path = row_ind['eeg_np_file']
         data_eeg = np.load(file_eeg_path)
         if self.is_random:
@@ -198,11 +200,13 @@ class InternalDataset(Dataset):
             len_sec = data_eeg.shape[1] / DEFAULT_SAMPLING_RATE
             warn(f"EEG file {file_eeg_path} is longer than {len_sec} seconds.")
             data_eeg = data_eeg[:, start_idx:start_idx + self.len_sampling]
-        X = torch.FloatTensor(data_eeg)
-        # X = torch.FloatTensor(data_eeg[:, start_idx:start_idx+self.len_sampling])
-        # Y = torch.FloatTensor(self.metadata_df.loc[file_idn]['class_label'].values.astype(np.float_))
-        Y  = row_ind['class_label'].astype(np.int_)
-        return X, Y
+        data_eeg = torch.FloatTensor(data_eeg)
+        label  = row_ind['class_label'].astype(np.int_)
+        item_data = {'data': data_eeg,
+                     'label': label,
+                     'id_key': id_key,
+                     'id_interval': id_interval,}
+        return item_data
 
 
 class TUABLoader(Dataset):
@@ -315,22 +319,30 @@ def prepare_internal_dataset(root_path: Path,
     """Prepares stratified train/validation/test splits from internal dataset"""
     if data_split is None:
         data_split = [0.8, 0.1, 0.1]
-    assert sum(data_split) == 1.0, "data_split must sum to 1.0"
-    assert len(data_split) == 3, "data_split must have 3 elements: train, val, test"
+    assert sum(data_split) == 1.0, \
+        "data_split must sum to 1.0"
+    assert len(data_split) == 3, \
+        "data_split must have 3 elements: train, val, test"
 
     metadata_csv_path = os.path.join(root_path, "metadata.csv") if metadata_csv_path is None else metadata_csv_path
-    assert os.path.isfile(metadata_csv_path), f"metadata_csv_path {metadata_csv_path} does not exist"
-    assert os.path.isdir(root_path), f"root_path {root_path} is not a directory"
+    assert os.path.isfile(metadata_csv_path), \
+        f"metadata_csv_path {metadata_csv_path} does not exist"
+    assert os.path.isdir(root_path), \
+        f"root_path {root_path} is not a directory"
     eeg_dataset = InternalDataset(root_path,
                                   is_normal_abnormal=is_normal_abnormal,
                                   metadata_csv_path=metadata_csv_path,
                                   class_labels=class_labels)
-    assert len(eeg_dataset) > MIN_DATA_LENGTH, f"No data found in {root_path}"
+    assert len(eeg_dataset) > MIN_DATA_LENGTH, \
+        f"No data found in {root_path}"
     id_keys = eeg_dataset.get_id_keys()
-    train_id,valid_test_id =train_test_split(id_keys,
-                                              train_size=data_split[0],  random_state=seed)
+    train_id, valid_test_id =train_test_split(id_keys,
+                                              train_size=data_split[0],
+                                             random_state=seed)
+
     valid_id,test_id =train_test_split(valid_test_id,
-                                       train_size=data_split[2]/(data_split[1]+data_split[2]), random_state=seed)
+                                       train_size=data_split[2]/(data_split[1]+data_split[2]),
+                                       random_state=seed)
     train_dataset = eeg_dataset.get_subset(train_id)
     valid_dataset = eeg_dataset.get_subset(valid_id)
     test_dataset = eeg_dataset.get_subset(test_id)

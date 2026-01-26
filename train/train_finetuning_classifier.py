@@ -10,9 +10,10 @@
 import math
 import sys
 from typing import Optional, List, Dict
-
+import numpy as np
 import torch
 from einops import rearrange
+import sklearn.metrics as sklearn_metrics
 from timm.utils import ModelEma
 from torch import nn, Tensor
 from tqdm import tqdm
@@ -22,10 +23,9 @@ from train.logers import MetricLogger
 from train.optimizers import get_loss_scale_for_deepspeed
 from train.training_utils import SmoothedValue
 from data import eeg_consts
-from models.neural_transformer import NeuralTransformer
-from models.vqnsp_model import VQNSP
 from models.classifier_model import NeurolCodebookClassifier
 from train.losses import get_vqnsp_losses, SpectralPatchedLoss
+import pandas as pd
 
 def train_class_batch(classify_model: NeurolCodebookClassifier,
                       # encode_model: NeuralTransformer,
@@ -86,8 +86,8 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
     else:
         optimizer.zero_grad()
 
-    for data_iter_step, (samples, targets) in tqdm(enumerate(metric_logger.log_every(data_loader, print_freq, header)),
-                                                   total=len(data_loader), desc=header):
+    for data_iter_step, data_batch in tqdm(enumerate(metric_logger.log_every(data_loader, print_freq, header)),
+                                                      total=len(data_loader), desc=header):
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
             continue
@@ -100,22 +100,22 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
                 if wd_schedule_values is not None and param_group["weight_decay"] > 0:
                     param_group["weight_decay"] = wd_schedule_values[it]
 
-        samples = samples.float().to(device, non_blocking=True) / 100
-        samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
+        eeg_data = data_batch['data'].float().to(device, non_blocking=True) / 100
+        eeg_data = rearrange(eeg_data, 'B N (A T) -> B N A T', T=200)
 
-        targets = targets.to(device, non_blocking=True)
+        targets = data_batch['label'].to(device, non_blocking=True)
         if is_binary:
             targets = targets.float().unsqueeze(-1)
 
         if loss_scaler is None:
-            samples = samples.half()
-            losses, output = train_class_batch(classify_model, samples, targets,
+            eeg_data = eeg_data.half()
+            losses, output = train_class_batch(classify_model, eeg_data, targets,
                                                classif_loss=classifier_loss,
                                                ch_names=input_chans,
                                                recon_loss=recon_loss)
         else:
             with torch.amp.autocast(device_type=device.type):
-                losses, output = train_class_batch(classify_model, samples, targets,
+                losses, output = train_class_batch(classify_model, eeg_data, targets,
                                                    classif_loss=classifier_loss,
                                                    ch_names=input_chans,
                                                    recon_loss=recon_loss)
@@ -213,7 +213,8 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
                         header: str = 'Test:',
                         ch_names: Optional[List[str]] = None,
                         metrics: Optional[List[str]] = None,
-                        is_binary=True)-> Dict[str, float]:
+                        is_binary: bool = True,
+                        threshold: float =0.5)-> [Dict[str, float], pd.DataFrame, np.ndarray]:
     if metrics is None:
         metrics = ['acc']
     input_chans = None
@@ -232,43 +233,50 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
     model.eval()
     pred_label = []
     true_label = []
+    id_key = []
+    id_interval = []
     print(f"Run eval in mode {header}...")
     for step, batch in tqdm(enumerate(metric_logger.log_every(data_loader, 10, header)),
                             total=len(data_loader),
                             desc=f"Eval-{header}"):
-        x_eeg = batch[0]
-        target_class = batch[-1]
-        x_eeg = x_eeg.float().to(device, non_blocking=True) / 100
-        x_eeg = rearrange(x_eeg, 'B N (A T) -> B N A T', T=200)
-        target_class = target_class.to(device, non_blocking=True)
+        x_eeg_batch = batch['data']
+        target_class_batch = batch['label']
+        id_key_batch = batch['id_key']
+        id_interval_batch = batch['id_interval']
+
+        x_eeg_batch = x_eeg_batch.float().to(device, non_blocking=True) / 100
+        x_eeg_batch = rearrange(x_eeg_batch, 'B N (A T) -> B N A T', T=200)
+        target_class_batch = target_class_batch.to(device, non_blocking=True)
         if is_binary:
-            target_class = target_class.float().unsqueeze(-1)
+            target_class_batch = target_class_batch.float().unsqueeze(-1)
         
         # compute output
         with torch.amp.autocast(device_type=device.type):
-            pred_out, decoder_out, encoder_out = model(x_eeg, input_chans=input_chans)
-            loss_classif = classif_loss(pred_out, target_class)
-            losses = get_vqnsp_losses(x_eeg, decoder_out, encoder_out, recon_loss)
+            pred_out, decoder_out, encoder_out = model(x_eeg_batch, input_chans=input_chans)
+            loss_classif = classif_loss(pred_out, target_class_batch)
+            losses_batch = get_vqnsp_losses(x_eeg_batch, decoder_out, encoder_out, recon_loss)
 
-        # losses["total_loss"] = loss_total
-        losses["loss_class"] = loss_classif
+        # losses_batch["total_loss"] = loss_total
+        losses_batch["loss_class"] = loss_classif
 
         if is_binary:
-            pred_class = torch.sigmoid(pred_out).cpu()
+            prob_class_batch = torch.sigmoid(pred_out).cpu()
         else:
-            pred_class = pred_class.cpu()
-        target_class = target_class.cpu()
+            prob_class_batch = prob_class_batch.cpu()
+        target_class_batch = target_class_batch.cpu()
 
-        results = get_metrics(pred_class.numpy(), target_class.numpy(), metrics, is_binary)
-        pred_label.append(pred_class)
-        true_label.append(target_class)
+        results_batch = get_metrics(prob_class_batch.numpy(), target_class_batch.numpy(), metrics, is_binary)
+        pred_label.append(prob_class_batch)
+        true_label.append(target_class_batch)
+        id_key.append(id_key_batch)
+        id_interval.append(id_interval_batch)
 
-        batch_size = x_eeg.shape[0]
+        batch_size = x_eeg_batch.shape[0]
         # metric_logger.update(loss=loss_classif.item())
-        for key, value in results.items():
+        for key, value in results_batch.items():
             metric_logger.meters[key].update(value, n=batch_size)
 
-        for key, loss_value in losses.items():
+        for key, loss_value in losses_batch.items():
             metric_logger.meters[key].update(loss_value.item())
 
         #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
@@ -280,11 +288,25 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
     
     pred_label = torch.cat(pred_label, dim=0).numpy()
     true_label = torch.cat(true_label, dim=0).numpy()
+    id_key = np.concatenate(id_key)
+    id_interval = np.concatenate(id_interval)
+    results_df = pd.DataFrame({'id_key': id_key,
+                               'id_interval': id_interval,
+                               'pred_label': pred_label[:,0],
+                               'true_label': true_label[:,0]})
 
-    eval_metrics = get_metrics(pred_label, true_label, metrics, is_binary, 0.5)
-    # ret['loss'] = metric_logger.loss.global_avg
+    eval_metrics = get_metrics(pred_label, true_label, metrics, is_binary, threshold=threshold)
 
-    for key in losses.keys():
+    for key in losses_batch.keys():
         eval_metrics[key] = metric_logger.meters[key].global_avg
 
-    return eval_metrics
+    prob_class_batch = (pred_label > threshold).astype(float)
+    conf_matrix = sklearn_metrics.confusion_matrix(true_label, prob_class_batch, normalize='true')
+    if is_binary:
+        tn, fp, fn, tp = conf_matrix.ravel().tolist()
+        eval_metrics['tn'] = tn
+        eval_metrics['fp'] = fp
+        eval_metrics['fn'] = fn
+        eval_metrics['tp'] = tp
+
+    return eval_metrics, results_df, conf_matrix

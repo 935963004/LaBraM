@@ -58,9 +58,10 @@ def load_state_dict(model: nn.Module, state_dict, prefix='', ignore_missing="rel
         print('\n'.join(error_msgs))
 
 
-def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None,
+def save_model(output_dir, args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None,
                save_ckpt_freq=1):
-    output_dir = Path(args.output_dir)
+    output_dir = Path(output_dir, 'models')
+    output_dir.mkdir(parents=True, exist_ok=True)
     epoch_name = str(epoch)
 
     if not getattr(args, 'enable_deepspeed', False):
