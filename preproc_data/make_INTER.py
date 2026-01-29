@@ -5,8 +5,6 @@ import numpy as np
 import os
 import pickle
 from warnings import warn
-from sklearn.frozen.tests.test_frozen import regression_dataset
-from torch.utils.hipify.hipify_python import meta_data
 from tqdm import tqdm
 from functools import partial
 from multiprocessing import Pool
@@ -27,7 +25,7 @@ def process_inter_dataset():
     input_path = "/home/leong/data/EEG/INTER_DATA/20K-EEG/"
     out_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
     labels = ["is_control", "is_lesion"]
-    # n_samples = 1000
+    n_samples = 1000
     balanced = False
     len_chunk_sec = 10
     n_jobs = 16#16

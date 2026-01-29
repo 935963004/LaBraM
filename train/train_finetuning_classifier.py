@@ -9,50 +9,52 @@
 # ---------------------------------------------------------
 import math
 import sys
-from typing import Iterable, Optional, List, Dict, Any
-import torch
-from timm.utils import ModelEma
-import utils
-from einops import rearrange
-from tqdm import tqdm
-from torch import nn, Tensor
-from modeling_finetune import NeuralTransformer
-from modeling_vqnsp import VQNSP
+from typing import Optional, List, Dict
 
+import torch
+from einops import rearrange
+from timm.utils import ModelEma
+from torch import nn, Tensor
+from tqdm import tqdm
+
+from train.evaluation import get_metrics
+from train.logers import MetricLogger
+from train.optimizers import get_loss_scale_for_deepspeed
+from train.training_utils import SmoothedValue
+from data import eeg_consts
+from models.neural_transformer import NeuralTransformer
+from models.vqnsp_model import VQNSP
+from train.losses import SpectralPatchedLoss
 
 def train_class_batch(pred_model: NeuralTransformer,
-                      vqnsp_model: Optional[VQNSP],
+                      vqnsp_model: VQNSP,
                       samples: Tensor,
                       target: Tensor,
                       criterion: nn.Module,
-                      ch_names: List[str],
-                      use_cls_token=False) -> tuple[Dict[str, Tensor], Tensor]:
+                      ch_names: List[str]) -> tuple[Dict[str, Tensor], Tensor]:
     batch_size, n_channels, n_samples, times = samples.shape
     out_pred = pred_model.forward(samples, ch_names)
     patch_tokens = out_pred['patch_tokens']
     pred_class = out_pred['pred_class']
-
+    recon_spec_loss = SpectralPatchedLoss()
     if vqnsp_model is not None:
         codebook_ind, quantize_loss, quantize_tokens = vqnsp_model.quantize_enc_features(patch_tokens,
                                                                                          n_channels)
-        rec_amplitude_loss, rec_phase_loss = vqnsp_model.get_spectral_quantize_recon_losses(samples, quantize_tokens, ch_names)
+        recon_amplitude, recon_angle = vqnsp_model.decode(quantize_tokens, ch_names)
+
+        rec_amplitude_loss, rec_phase_loss = recon_spec_loss(samples, recon_amplitude, recon_angle)
     else:
         quantize_loss = rec_amplitude_loss = rec_phase_loss = torch.zeros(1, device=samples.device)
     loss_finetune_class = criterion(pred_class, target)
 
     loss_total = loss_finetune_class + quantize_loss + rec_amplitude_loss + 0.1*rec_phase_loss
-    loss = {"loss_total": loss_total,
+    losses = {"loss_total": loss_total,
             "loss_finetune_class": loss_finetune_class,
             "quantize_loss": quantize_loss,
             "rec_amplitude_loss": rec_amplitude_loss ,
             "rec_phase_loss": rec_phase_loss}
 
-    return loss, pred_class
-
-
-def get_loss_scale_for_deepspeed(model):
-    optimizer = model.optimizer
-    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
+    return losses, pred_class
 
 
 def train_one_epoch(transformer_model: torch.nn.Module,
@@ -72,16 +74,15 @@ def train_one_epoch(transformer_model: torch.nn.Module,
                     num_training_steps_per_epoch=None,
                     update_freq=None,
                     ch_names=None,
-                    is_binary=True,
-                    use_cls_token=False,
+                    is_binary=True
                     ):
     input_chans = None
     if ch_names is not None:
-        input_chans = utils.get_input_chans(ch_names)
+        input_chans = eeg_consts.get_input_chans(ch_names)
     transformer_model.train(True)
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger = MetricLogger(delimiter="  ")
+    metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    metric_logger.add_meter('min_lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
@@ -108,24 +109,17 @@ def train_one_epoch(transformer_model: torch.nn.Module,
         samples = samples.float().to(device, non_blocking=True) / 100
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
 
-        # with torch.no_grad():
-        #     with torch.cuda.amp.autocast():
-        #         input_ids = vqnsp_model.get_codebook_indices(samples, input_chans)
-        
         targets = targets.to(device, non_blocking=True)
         if is_binary:
             targets = targets.float().unsqueeze(-1)
 
         if loss_scaler is None:
             samples = samples.half()
-            losses, output = train_class_batch(
-                transformer_model, vqnsp_model, samples, targets, criterion, input_chans,
-            use_cls_token=use_cls_token)
+            losses, output = train_class_batch(transformer_model, vqnsp_model, samples, targets, criterion, input_chans)
         else:
             with torch.amp.autocast(device_type=device.type):
-                losses, output = train_class_batch(
-                    transformer_model, vqnsp_model, samples, targets, criterion, input_chans,
-                    use_cls_token=use_cls_token)
+                losses, output = train_class_batch(transformer_model, vqnsp_model, samples, targets, criterion,
+                                                   input_chans)
 
         loss_total = losses["loss_total"]
         loss_value = loss_total.item()
@@ -167,7 +161,9 @@ def train_one_epoch(transformer_model: torch.nn.Module,
             raise Exception(f"Invalid device: device={device}")
 
         if is_binary:
-            class_acc = utils.get_metrics(torch.sigmoid(output).detach().cpu().float().numpy(), targets.detach().cpu().float().numpy(), ["accuracy"], is_binary)["accuracy"]
+            class_acc = get_metrics(torch.sigmoid(output).detach().cpu().float().numpy(),
+                                               targets.detach().cpu().float().numpy(), ["accuracy"], is_binary)[
+                "accuracy"]
         else:
             class_acc = (output.max(-1)[-1] == targets.squeeze()).float().mean()
             
@@ -212,24 +208,24 @@ def train_one_epoch(transformer_model: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader: torch.utils.data.DataLoader,
-             model: torch.nn.Module,
-             device: torch.device,
-             header: str='Test:',
-             ch_names: Optional[List[str]]=None,
-             metrics: Optional[List[str]]=None,
-             is_binary=True):
+def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
+                        model: torch.nn.Module,
+                        device: torch.device,
+                        header: str = 'Test:',
+                        ch_names: Optional[List[str]] = None,
+                        metrics: Optional[List[str]] = None,
+                        is_binary=True):
     if metrics is None:
         metrics = ['acc']
     input_chans = None
     if ch_names is not None:
-        input_chans = utils.get_input_chans(ch_names)
+        input_chans = eeg_consts.get_input_chans(ch_names)
     if is_binary:
         criterion = torch.nn.BCEWithLogitsLoss()
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = MetricLogger(delimiter="  ")
     #header = 'Test:'
 
     # switch to evaluation mode
@@ -259,7 +255,7 @@ def evaluate(data_loader: torch.utils.data.DataLoader,
             pred_class = pred_class.cpu()
         target = target.cpu()
 
-        results = utils.get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
+        results = get_metrics(pred_class.numpy(), target.numpy(), metrics, is_binary)
         pred.append(pred_class)
         true.append(target)
 
@@ -276,6 +272,6 @@ def evaluate(data_loader: torch.utils.data.DataLoader,
     pred = torch.cat(pred, dim=0).numpy()
     true = torch.cat(true, dim=0).numpy()
 
-    ret = utils.get_metrics(pred, true, metrics, is_binary, 0.5)
+    ret = get_metrics(pred, true, metrics, is_binary, 0.5)
     ret['loss'] = metric_logger.loss.global_avg
     return ret

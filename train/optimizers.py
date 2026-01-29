@@ -7,20 +7,22 @@
 # https://github.com/facebookresearch/deit/
 # https://github.com/facebookresearch/dino
 # ---------------------------------------------------------
-import torch
-from torch import optim as optim
+import json
+import math
+from math import inf
 
+import numpy as np
+import torch
+from timm.optim import NAdam
+from timm.optim import RAdam
 from timm.optim.adafactor import Adafactor
 from timm.optim.adahessian import Adahessian
 from timm.optim.adamp import AdamP
 from timm.optim.lookahead import Lookahead
-from timm.optim import NAdam
 from timm.optim.nvnovograd import NvNovoGrad
-from timm.optim import RAdam
 from timm.optim.rmsprop_tf import RMSpropTF
 from timm.optim.sgdp import SGDP
-
-import json
+from torch import optim as optim
 
 try:
     from apex.optimizers import FusedNovoGrad, FusedAdam, FusedLAMB, FusedSGD
@@ -28,19 +30,6 @@ try:
 except ImportError:
     has_apex = False
 
-
-def get_num_layer_for_vit(var_name, num_max_layer):
-    if var_name in ("cls_token", "mask_token", "pos_embed"):
-        return 0
-    elif var_name.startswith("patch_embed"):
-        return 0
-    elif var_name.startswith("rel_pos_bias"):
-        return num_max_layer - 1
-    elif var_name.startswith("blocks"):
-        layer_id = int(var_name.split('.')[1])
-        return layer_id + 1
-    else:
-        return num_max_layer - 1
 
 
 class LayerDecayValueAssigner(object):
@@ -51,7 +40,7 @@ class LayerDecayValueAssigner(object):
         return self.values[layer_id]
 
     def get_layer_id(self, var_name):
-        return get_num_layer_for_vit(var_name, len(self.values))
+        return _get_num_layer_for_vit(var_name, len(self.values))
 
 
 def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=None, get_layer_scale=None, **kwargs):
@@ -188,3 +177,116 @@ def create_optimizer(args, model, get_num_layer=None, get_layer_scale=None, filt
             optimizer = Lookahead(optimizer)
 
     return optimizer
+
+
+def get_grad_norm(parameters, norm_type=2):
+    """Computes total gradient norm across parameters"""
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    parameters = list(filter(lambda p: p.grad is not None, parameters))
+    norm_type = float(norm_type)
+    total_norm = 0
+    for p in parameters:
+        param_norm = p.grad.data.norm(norm_type)
+        total_norm += param_norm.item() ** norm_type
+    total_norm = total_norm ** (1. / norm_type)
+    return total_norm
+
+
+def get_grad_norm_(parameters, norm_type: float = 2.0, layer_names=None) -> torch.Tensor:
+    """Computes gradient norm across model parameters"""
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+
+    parameters = [p for p in parameters if p.grad is not None]
+
+    norm_type = float(norm_type)
+    if len(parameters) == 0:
+        return torch.tensor(0.)
+    device = parameters[0].grad.device
+
+    if norm_type == inf:
+        total_norm = max(p.grad.detach().abs().max().to(device) for p in parameters)
+    else:
+        # total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in parameters]), norm_type)
+        layer_norm = torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in parameters])
+        total_norm = torch.norm(layer_norm, norm_type)
+        # print(layer_norm.max(dim=0))
+
+        if layer_names is not None:
+            if torch.isnan(total_norm) or torch.isinf(total_norm) or total_norm > 1.0:
+                value_top, name_top = torch.topk(layer_norm, k=5)
+                print(f"Top norm value: {value_top}")
+                print(f"Top norm name: {[layer_names[i][7:] for i in name_top.tolist()]}")
+
+    return total_norm
+
+
+def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0,
+                     start_warmup_value=0, warmup_steps=-1):
+    """Generates learning rate schedule with cosine decay and warmup"""
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep
+    if warmup_steps > 0:
+        warmup_iters = warmup_steps
+    print("Set warmup steps = %d" % warmup_iters)
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = np.array(
+        [final_value + 0.5 * (base_value - final_value) * (1 + math.cos(math.pi * i / (len(iters)))) for i in iters])
+
+    schedule = np.concatenate((warmup_schedule, schedule))
+
+    assert len(schedule) == epochs * niter_per_ep
+    return schedule
+
+
+class NativeScalerWithGradNormCount:
+    state_dict_key = "amp_scaler"
+
+    def __init__(self):
+        self._scaler = torch.amp.GradScaler(device='cuda' if torch.cuda.is_available() else "cpu")
+
+    def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True,
+                 layer_names=None):
+        self._scaler.scale(loss).backward(create_graph=create_graph)
+        if update_grad:
+            if clip_grad is not None:
+                assert parameters is not None
+                self._scaler.unscale_(optimizer)  # unscale the gradients of optimizer's assigned params in-place
+                norm = torch.nn.utils.clip_grad_norm_(parameters, clip_grad, error_if_nonfinite=False)
+            else:
+                self._scaler.unscale_(optimizer)
+                norm = get_grad_norm_(parameters, layer_names=layer_names)
+            self._scaler.step(optimizer)
+            self._scaler.update()
+        else:
+            norm = None
+        return norm
+
+    def state_dict(self):
+        return self._scaler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self._scaler.load_state_dict(state_dict)
+
+
+def _get_num_layer_for_vit(var_name: str, num_max_layer: int) -> int:
+    if var_name in ("cls_token", "mask_token", "pos_embed"):
+        return 0
+    elif var_name.startswith("patch_embed"):
+        return 0
+    elif var_name.startswith("rel_pos_bias"):
+        return num_max_layer - 1
+    elif var_name.startswith("blocks"):
+        layer_id = int(var_name.split('.')[1])
+        return layer_id + 1
+    else:
+        return num_max_layer - 1
+
+
+def get_loss_scale_for_deepspeed(model) -> float:
+    optimizer = model.optimizer
+    return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
