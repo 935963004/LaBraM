@@ -408,7 +408,7 @@ def main(args: argparse.Namespace, ds_init):
             skip_list=skip_weight_decay_list,
             get_num_layer=assigner.get_layer_id if assigner is not None else None,
             get_layer_scale=assigner.get_scale if assigner is not None else None,
-            # filter_name=filter_opt
+            filter_name=filter_opt
         )
         loss_scaler = NativeScaler()
 
