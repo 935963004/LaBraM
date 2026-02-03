@@ -29,7 +29,7 @@ class FeaturesTypes(enum.Enum):
 class NeurolCodebookClassifier(nn.Module):
     def __init__(self,
                  vqnsp_model: VQNSP,
-                 encoder_model: Optional[NeuralTransformer]=None,
+                 encoder_model: NeuralTransformer,
                  num_classes: int = 10,
                  classifier_type: str = 'linear', # or 'mlp'
                  drop_rate: float = 0.0,
