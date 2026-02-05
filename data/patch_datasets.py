@@ -30,6 +30,7 @@ class HMCLoader(Dataset):
         self.text_max_len = text_max_len
 
         if is_instruct:
+            # TODO:  fix this logic
             pass
             # enc = tiktoken.get_encoding("gpt2")
             # encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
@@ -226,16 +227,30 @@ class TUABLoader(Dataset):
 
 
 class TUEVLoader(Dataset):
-    def __init__(self, root, files, sampling_rate=200):
+    """
+    A PyTorch dataset that load prosessed to patches from TUEV dataset files.
+
+
+
+    Attributes:
+        root (str): The root directory path where the data files are stored.
+        files (List[str]): A list of file names within the root directory
+            to be loaded and managed.
+        default_rate (int): The default sampling rate for the dataset
+            (default value is 200).
+        sampling_rate (int): The user-specified sampling rate for the
+            dataset. Defaults to 200 if not provided.
+    """
+    def __init__(self, root: str, files: List[str], sampling_rate=200):
         self.root = root
         self.files = files
         self.default_rate = 200
         self.sampling_rate = sampling_rate
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.files)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
         sample = pickle.load(open(os.path.join(self.root, self.files[index]), "rb"))
         X = sample["signal"]
         if self.sampling_rate != self.default_rate:

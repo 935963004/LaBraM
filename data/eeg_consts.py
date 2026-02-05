@@ -1,5 +1,7 @@
 
-standard_1020 = [
+# Canonical EEG channel names from TUAB/TUH datasets that were
+# used in training of the mode
+STANDARD_1020 = [
     'FP1', 'FPZ', 'FP2',
     'AF9', 'AF7', 'AF5', 'AF3', 'AF1', 'AFZ', 'AF2', 'AF4', 'AF6', 'AF8', 'AF10', \
     'F9', 'F7', 'F5', 'F3', 'F1', 'FZ', 'F2', 'F4', 'F6', 'F8', 'F10', \
@@ -24,12 +26,12 @@ MIN_LEN_SEC = 10 * 60
 def get_chans(ch_names):
     chans = []
     for ch_name in ch_names:
-        chans.append(standard_1020.index(ch_name))
+        chans.append(STANDARD_1020.index(ch_name))
     return chans
 
 
 def get_input_chans(ch_names):
     input_chans = [0]  # for cls token
     for ch_name in ch_names:
-        input_chans.append(standard_1020.index(ch_name) + 1)
+        input_chans.append(STANDARD_1020.index(ch_name) + 1)
     return input_chans
