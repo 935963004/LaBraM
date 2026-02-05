@@ -14,7 +14,7 @@ from scipy.signal import resample
 from sklearn.model_selection import train_test_split
 
 from data.hdf5_datasets import ShockDataset
-from data.eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE
+from data.eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE, DEFAULT_SEGMENT_LENGTH_SECS
 
 
 class HMCLoader(Dataset):
@@ -31,7 +31,7 @@ class HMCLoader(Dataset):
 
         if is_instruct:
             # TODO:  fix this logic
-            pass
+            raise NotImplementedError("free text instruction not supported yet")
             # enc = tiktoken.get_encoding("gpt2")
             # encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
             # # 50257 for [SEP]
@@ -127,13 +127,31 @@ class InternalDataset(Dataset):
     def __init__(self,
                  ds_path: str,
                  metadata_csv_path: str,
-                 class_labels: list,
+                 class_labels: List[str],
                  is_normal_abnormal: bool = False, ## class_labels[0] must be normal class label
-                 len_in_sec: int=10,
+                 len_in_sec: int = DEFAULT_SEGMENT_LENGTH_SECS,
                  is_random: bool = False):
-        self.root = ds_path
+        """
+        Initializes an instance of PyTorch Dataset that loads prossesced patches of Inetral EEG data
+        with corresponding metadata from a CSV file and return item for training with requred labels
+
+        Parameters:
+            ds_path (str): The directory path to the dataset containing prossed EEG signals
+            that split to segments from `.npy` files.
+            metadata_csv_path (str): The file path to the metadata CSV containing information about the EEG data.
+            class_labels (list): A list of column names in the CSV file representing class label indicators.
+            is_normal_abnormal (bool): A flag indicating if the labels should be processed as binary
+                                        "normal vs abnormal". Defaults to False. If True, `class_labels[0]`
+                                        must correspond to the 'normal' class label.
+            len_in_sec (int): The desired input segment length in seconds.
+                                Defaults to 10 seconds (split to 10 patches). Used to calculate
+                              the number of required sampling points per segment.
+            is_random (bool): Whether to shuffle/select segments randomly for loading. Defaults to False.
+
+        """
+        self.ds_path = ds_path
         self.is_normal_abnormal = is_normal_abnormal
-        eeg_np_files=  list(Path(self.root).glob("*.npy"))
+
         self.metadata_df: pd.DataFrame = pd.read_csv(metadata_csv_path)
         if not set(class_labels).issubset(self.metadata_df.columns):
             raise ValueError(f"Metadata CSV is missing required columns: {set(class_labels) - set(self.metadata_df.columns)}")
@@ -143,6 +161,7 @@ class InternalDataset(Dataset):
         else:
             self.metadata_df = self.metadata_df[(self.metadata_df[class_labels].sum(1) == 1.0)]
 
+        eeg_np_files = list(Path(self.ds_path).glob("*.npy"))
         id_keys = list(map(lambda x: x.stem.split("_")[0], eeg_np_files))
         id_interval = list(map(lambda x: x.stem.split("_")[1], eeg_np_files))
         ids_unique = np.unique(id_keys, return_counts=False)
@@ -154,13 +173,11 @@ class InternalDataset(Dataset):
         ids_common = self.metadata_df.index.intersection(ids_unique)
         self.metadata_df = self.metadata_df.loc[ids_common]
         self.eeg_files_df = self.eeg_files_df.loc[ids_common]
-        # self.metadata_df = self.metadata_df.merge(eeg_files_df, left_index=True, right_index=True, how="inner")
 
         if self.metadata_df.shape[0] < MIN_DATA_LENGTH:
             raise ValueError(f"Metadata CSV contains less than {MIN_DATA_LENGTH} rows.")
 
-        # self.metadata_df['length_sec'] = list(map(lambda x: np.load(x).shape[1] / DEFAULT_SAMPLING_RATE,
-        #                                           self.metadata_df['eeg_np_file']))
+
         self.default_rate = DEFAULT_SAMPLING_RATE
 
         self.len_sampling = len_in_sec * DEFAULT_SAMPLING_RATE
@@ -168,32 +185,61 @@ class InternalDataset(Dataset):
         self.class_labels = class_labels
         self.n_classes = len(self.class_labels)
 
-    def __len__(self):
-        return self.eeg_files_df.shape[0] #self.metadata_df.shape[0]
-
-    def get_n_keys(self)->int:
+    def __len__(self) -> int:
         return self.eeg_files_df.shape[0]
 
-    def get_id_keys(self)->List[str]:
+    # List of unique identifiers of EEG samples
+    @property
+    def id_keys(self)->List[str]:
         return self.metadata_df.index.tolist()
 
     def get_subset(self, id_keys: List[str]) -> torch.utils.data.Subset:
+        """
+        Create a subset of the current dataset based on specified keys of EEG samples.
+        Arguments:
+        id_keys: List[str]
+            A list of identifier keys of EEG samples .
+        Returns:
+        torch.utils.data.Subset
+            A subset of the dataset containing only the entries that match the specified identifier keys.
+        """
         file_ids = np.nonzero(self.eeg_files_df.index.isin(id_keys))[0]
         return torch.utils.data.Subset(self, file_ids)
 
-    def __getitem__(self, index: Union[int, List[int]]) -> Dict[str, torch.Tensor]:
-        file_info = self.eeg_files_df.iloc[index]
+    def __getitem__(self, ind: Union[int, List[int]]) -> Dict[str, torch.Tensor]:
+        """
+        Retrieves an item of EEG data and corresponding metadata based on the provided index( or multi index N/A now).
+
+
+
+        Parameters:
+        ind (Union[int, List[int]]): Index or indices specifying the EEG data to retrieve.
+
+        Returns:
+        Dict[str, torch.Tensor]: A dictionary of data item containing the following keys:
+          - 'data': Processed asegment EEG file data as a torch.FloatTensor.
+          - 'label': Class/classes label associated with the EEG data.
+          - 'id_key': Unique identifier key corresponding to the retrieved data.
+          - 'id_interval': Interval identifier for the EEG data.
+
+        Raises:
+        NotImplementedError: Raised when specific behaviors for custom indices or random sampling
+                             are not yet implemented.
+
+        Warns:
+        UserWarning: Issued if the length of the EEG data exceeds the predefined sampling length.
+        """
+        file_info = self.eeg_files_df.iloc[ind]
         id_key = file_info.name
         id_interval = file_info['id_interval']
         file_eeg_path = file_info['eeg_np_file']
         row_ind = self.metadata_df.loc[id_key]
-        # file_eeg_path = row_ind['eeg_np_file']
         data_eeg = np.load(file_eeg_path)
         if self.is_random:
             start_idx = np.random.randint(0, data_eeg.shape[0] - self.len_sampling)
             raise NotImplementedError
-        elif isinstance(index, list):
-            start_idx = index[1]
+        elif isinstance(ind, list):
+            start_idx = ind[1]
             raise NotImplementedError
         else:
             start_idx = 0
@@ -350,10 +396,9 @@ def prepare_internal_dataset(root_path: Path,
                                   class_labels=class_labels)
     assert len(eeg_dataset) > MIN_DATA_LENGTH, \
         f"No data found in {root_path}"
-    id_keys = eeg_dataset.get_id_keys()
-    train_id, valid_test_id =train_test_split(id_keys,
+    train_id, valid_test_id =train_test_split(eeg_dataset.id_keys,
                                               train_size=data_split[0],
-                                             random_state=seed)
+                                              random_state=seed)
 
     valid_id,test_id =train_test_split(valid_test_id,
                                        train_size=data_split[2]/(data_split[1]+data_split[2]),
