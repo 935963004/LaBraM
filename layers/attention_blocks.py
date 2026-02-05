@@ -10,7 +10,7 @@ class Attention(nn.Module):
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_norm=None, qk_scale=None, attn_drop=0.,
             proj_drop=0., window_size=None, attn_head_dim=None):
-        """Initializes attention layer with configurable parameters"""
+        """Initializes attention layer with configurable parameters with position encoding"""
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -74,7 +74,8 @@ class Attention(nn.Module):
         B, N, C = x.shape
         qkv_bias = None
         if self.q_bias is not None:
-            qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
+            qkv_bias = torch.cat((self.q_bias,
+                                  torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
         # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
