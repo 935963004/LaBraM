@@ -3,12 +3,13 @@ import io
 import os
 from pathlib import Path
 import torch
+import torch.nn as nn
 from timm.utils import get_state_dict
 
 from utils.dist_utils import save_on_master
 
 
-def load_state_dict(model, state_dict, prefix='', ignore_missing="relative_position_index"):
+def load_state_dict(model: nn.Module, state_dict, prefix='', ignore_missing="relative_position_index"):
     missing_keys = []
     unexpected_keys = []
     error_msgs = []
