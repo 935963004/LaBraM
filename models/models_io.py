@@ -2,14 +2,55 @@ import glob
 import io
 import os
 from pathlib import Path
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
+from torch import Tensor
 from timm.utils import get_state_dict
 
 from utils.dist_utils import save_on_master
 
 
-def load_state_dict(model: nn.Module, state_dict, prefix='', ignore_missing="relative_position_index"):
+def load_state_dict(model: nn.Module,
+                    state_dict: Dict[str, Tensor],
+                    prefix: str = '',
+                    ignore_missing: str ="relative_position_index"):
+    """
+    Loads a given state dictionary into a model, handling submodules and providing detailed logs of
+    missing, unexpected, and ignored keys. This function modifies the given state dictionary to ensure
+    compatibility with the `_load_from_state_dict` function and filters missing keys based on provided
+    criteria.
+
+    Parameters:
+    - model: nn.Module
+      The model into which the state dictionary will be loaded.
+    - state_dict: Dict[str, Tensor]
+      A dictionary containing the states to be loaded. It maps parameter names to their corresponding
+      tensors.
+    - prefix: str, optional
+      A prefix to be applied to the parameter names in the state dictionary. Default is an empty string.
+    - ignore_missing: str, optional
+      A pipe-separated string of substrings used to filter out certain missing keys. Keys containing
+      these substrings are ignored when loading the state dictionary. Default is "relative_position_index".
+
+    Raises:
+    - None
+
+    """
+    def _load_submodule(module_: nn.Module, prefix_: str = ''):
+        local_metadata = {} if metadata is None else metadata.get(
+            prefix_[:-1], {})
+        module_._load_from_state_dict(
+            state_dict, prefix_, local_metadata,
+            strict=True,
+            missing_keys=missing_keys,
+            unexpected_keys=unexpected_keys,
+            error_msgs=error_msgs)
+        for name, child in module_._modules.items():
+            if child is not None:
+                _load_submodule(child, prefix_ + name + '.')
+
     missing_keys = []
     unexpected_keys = []
     error_msgs = []
@@ -19,16 +60,7 @@ def load_state_dict(model: nn.Module, state_dict, prefix='', ignore_missing="rel
     if metadata is not None:
         state_dict._metadata = metadata
 
-    def load(module, prefix=''):
-        local_metadata = {} if metadata is None else metadata.get(
-            prefix[:-1], {})
-        module._load_from_state_dict(
-            state_dict, prefix, local_metadata, True, missing_keys, unexpected_keys, error_msgs)
-        for name, child in module._modules.items():
-            if child is not None:
-                load(child, prefix + name + '.')
-
-    load(model, prefix=prefix)
+    _load_submodule(model, prefix_=prefix)
 
     warn_missing_keys = []
     ignore_missing_keys = []
@@ -58,8 +90,16 @@ def load_state_dict(model: nn.Module, state_dict, prefix='', ignore_missing="rel
         print('\n'.join(error_msgs))
 
 
-def save_model(output_dir, args, epoch, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None,
-               save_ckpt_freq=1):
+def save_model(output_dir: str, args,
+               epoch: int,
+               model: nn.Module,
+               model_without_ddp: nn.Module,
+               optimizer: torch.optim.Optimizer,
+               loss_scaler,
+               model_ema: Optional[torch.nn.Module] = None,
+               optimizer_disc=None,
+               save_ckpt_freq: int = 1):
+    # TODO complite docs for save_model after configs finishing
     output_dir = Path(output_dir, 'models')
     output_dir.mkdir(parents=True, exist_ok=True)
     epoch_name = str(epoch)
@@ -161,3 +201,4 @@ def _load_checkpoint_for_ema(model_ema, checkpoint):
     torch.save(checkpoint, mem_file)
     mem_file.seek(0)
     model_ema._load_checkpoint(mem_file)
+
