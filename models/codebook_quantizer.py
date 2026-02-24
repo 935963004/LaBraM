@@ -11,39 +11,43 @@
 import torch
 import torch.distributed as distributed
 import torch.nn as nn
-from torch import Tensor
 import torch.nn.functional as F
 from einops import rearrange, repeat
+from torch import Tensor
+
+from configs import ConfigCodebookQuantizer
 
 
 class NormEMAVectorQuantizer(nn.Module):
-    def __init__(self,
-                 n_embed: int=8192,
-                 embedding_dim: int=32,
-                 beta: float = 1.0,
-                 decay: float = 0.99,
-                 eps: float = 1e-5,
-                 statistic_code_usage: bool = True,
-                 kmeans_init: bool = False,
-                 codebook_init_path: str = '',
-                 update_codebook: bool = True):
+    # def __init__(self,
+    #              n_embed: int=8192,
+    #              embedding_dim: int=32,
+    #              beta: float = 1.0,
+    #              decay: float = 0.99,
+    #              eps: float = 1e-5,
+    #              statistic_code_usage: bool = True,
+    #              kmeans_init: bool = False,
+    #              codebook_init_path: str = '',
+    #              update_codebook: bool = True):
+    def __init__(self, cfg: ConfigCodebookQuantizer):
         super().__init__()
-        self.codebook_dim = embedding_dim
-        self.num_tokens = n_embed
-        self.beta = beta
-        self.decay = decay
+        self.cfg = cfg
+        # self.codebook_dim = embedding_dim
+        # self.num_tokens = self.cfg.num_tokens
+        # self.beta = beta
+        # self.decay = self.cfg.decay_codebook_mov_avg
 
         # learnable = True if orthogonal_reg_weight > 0 else False
-        self.embedder = EmbeddingEMA(self.num_tokens,
-                                     self.codebook_dim,
-                                     decay,
-                                     eps,
-                                     kmeans_init,
-                                     codebook_init_path)
-        self.embedder.update = update_codebook
-        self.statistic_code_usage = statistic_code_usage
-        if statistic_code_usage:
-            self.register_buffer('cluster_size', torch.zeros(n_embed))
+        self.embedder = EmbeddingEMA(self.cfg.num_tokens,
+                                     self.cfg.emb_dim,
+                                     self.cfg.decay_codebook_mov_avg,
+                                     self.cfg.eps_smoothing,
+                                     self.cfg.kmeans_init,
+                                     self.cfg.codebook_init_path)
+        self.embedder.update = self.cfg.update_codebook
+        # self.statistic_code_usage = self.cfg.statistic_code_usage
+        if self.cfg.statistic_code_usage:
+            self.register_buffer('cluster_size', torch.zeros(self.cfg.num_tokens))
         if distributed.is_available() and distributed.is_initialized():
             print("ddp is enable, so use ddp_reduce to sync the statistic_code_usage for each gpu!")
             self.all_reduce_fn = distributed.all_reduce
@@ -65,7 +69,7 @@ class NormEMAVectorQuantizer(nn.Module):
         # z, 'b c h w -> b h w c'
         z = rearrange(z, 'b c h w -> b h w c')
         z = l2norm(z)
-        z_flattened = z.reshape(-1, self.codebook_dim)
+        z_flattened = z.reshape(-1, self.cfg.emb_dim)
         self.embedder.init_embed_(z_flattened)
 
         # l2 distance between normalized vectors z_flattened and codebook words
@@ -80,7 +84,7 @@ class NormEMAVectorQuantizer(nn.Module):
         z_quantized = self.embedder(encoding_indices).view(z.shape)
 
         # one-hot encoding of the encoding indices into a codebook
-        encodings_onehot = F.one_hot(encoding_indices, self.num_tokens).type(z.dtype)
+        encodings_onehot = F.one_hot(encoding_indices, self.cfg.num_tokens).type(z.dtype)
         encoding_bins = encodings_onehot.mean(1)
         encoding_indices = encoding_indices.view(z.shape[:-1])
         encoding_bins=encoding_bins.view(z.shape[:-1])
@@ -88,7 +92,7 @@ class NormEMAVectorQuantizer(nn.Module):
             with torch.no_grad():
                 cluster_size = encodings_onehot.sum(0)
                 self.all_reduce_fn(cluster_size)
-                ema_inplace(self.cluster_size, cluster_size, self.decay)
+                ema_inplace(self.cluster_size, cluster_size, self.cfg.decay_codebook_mov_avg)
 
         if self.training and self.embedder.update:
             # EMA cluster size
@@ -97,7 +101,7 @@ class NormEMAVectorQuantizer(nn.Module):
             self.all_reduce_fn(batch_bins)
 
             # self.embedding.cluster_size_ema_update(bins)
-            ema_inplace(self.cluster_size, batch_bins, self.decay)
+            ema_inplace(self.cluster_size, batch_bins, self.cfg.decay_codebook_mov_avg)
 
             zero_mask = (batch_bins == 0)
             batch_bins = batch_bins.masked_fill(zero_mask, 1.)
@@ -111,10 +115,10 @@ class NormEMAVectorQuantizer(nn.Module):
             embed_normalized = torch.where(zero_mask[..., None], self.embedder.weight,
                                            embed_normalized)
 
-            norm_ema_inplace(self.embedder.weight, embed_normalized, self.decay)
+            norm_ema_inplace(self.embedder.weight, embed_normalized, self.cfg.decay_codebook_mov_avg)
 
         # compute quantize_err for embedding = 1 - cosine similarity between z_quantized and z_e
-        quantize_err = self.beta * F.mse_loss(z_quantized.detach(), z)
+        quantize_err = self.cfg.betta_quantize_err * F.mse_loss(z_quantized.detach(), z)
 
         # preserve gradients
         z_quantized = z + (z_quantized - z).detach()
@@ -125,12 +129,12 @@ class NormEMAVectorQuantizer(nn.Module):
         return z_quantized, quantize_err, encoding_indices, encoding_bins
 
     def reset_cluster_size(self, device):
-        if self.statistic_code_usage:
-            self.register_buffer('cluster_size', torch.zeros(self.num_tokens))
+        if self.cfg.statistic_code_usage:
+            self.register_buffer('cluster_size', torch.zeros(self.cfg.num_tokens))
             self.cluster_size = self.cluster_size.to(device)
 
 class EmbeddingEMA(nn.Module):
-    def __init__(self, num_tokens, codebook_dim, decay=0.99, eps=1e-5, kmeans_init=True, codebook_init_path=''):
+    def __init__(self, num_tokens, codebook_dim, decay=0.99, eps=1e-5, kmeans_init=True, codebook_init_path: str = ''):
         super().__init__()
         self.num_tokens = num_tokens
         self.codebook_dim = codebook_dim

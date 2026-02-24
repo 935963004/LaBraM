@@ -66,8 +66,10 @@ def to_json(obj: Any, json_file: str, indent: int = 4, encoder: json.JSONEncoder
 
 
 def from_yaml(yaml_url: str) -> Any:
-    with open(yaml_url, 'r') as f:
-        obj = yaml.load(f)
+    if not os.path.isfile(yaml_url):
+        raise FileNotFoundError(f'Not exist yaml file: {yaml_url}')
+    with open(yaml_url, 'r', encoding='utf-8') as f:
+        obj = yaml.safe_load(f)
     return obj
 
 

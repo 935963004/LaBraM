@@ -21,8 +21,8 @@ from torch import Tensor
 import logers
 import training_utils
 from data import eeg_consts
-from models.vqnsp_model import VQNSP
 from models.masked_neural_transformer import NeuralTransformerForMEM
+from models.vqnsp_model import VQNSP
 from utils import dist_utils
 
 

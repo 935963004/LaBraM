@@ -8,6 +8,7 @@ from configs.config_base import ParamsBase
 
 @dataclass
 class ConfigProcEEGDataset(ParamsBase):
+    # validate_on_init = False
     ds_name: Optional[str] = None  # Name of the dataset used for training
     data_eeg_files_path: Optional[str] = None
     metadata_csv_oath: Optional[str] = None
@@ -16,6 +17,7 @@ class ConfigProcEEGDataset(ParamsBase):
     is_binary_label: bool = False  # if TRUE labels are binary: 0-Normal(Control) or 1-Abnormal
     normal_labels: Optional[List[str]] = field(default_factory=lambda: ['is_control'])
     abnormal_labels: Optional[List[str]] = field(default_factory=lambda: ['is_abnormal'])
+    num_classes: int = 0
 
     batch_size_train: int = 8  # Batch size for training-data loading
     batch_size_inference: int = 16  # Batch size for inference-data loading
@@ -26,7 +28,7 @@ class ConfigProcEEGDataset(ParamsBase):
     ds_part: float = 1.0  # Used in debugging only. Fraction of training-data used for training in debugging mode
     data_type: str = 'pretrained-features'  # Features to be used. Currently only 'pretrained-features' exist
     seed_ds_split_train: Optional[int] = None  # Seed for the train-validation split
-
+    seed: int = 4523
     fold_split_path: Optional[
         str] = None  # Path to JSON file specifying the samples partitioning between the train and the validation datasets in the train/valid split.
 

@@ -21,77 +21,69 @@ Attributes:
 - decoder_out_dim: Output dimension for decoding tasks.
 
 """
-from typing import Dict, List, Tuple, Any, Set
+from typing import Dict, List, Tuple, Set
+
 import torch
 from einops import rearrange
 from timm.layers import trunc_normal_
 from torch import nn, Tensor
 
+from configs import ConfigVQNSP
 from models.codebook_quantizer import NormEMAVectorQuantizer
 from models.neural_transformer import NeuralTransformer
 
 
 class VQNSP(nn.Module):
     def __init__(self,
-                 encoder_config: Dict[str, Any],
-                 decoder_config: Dict[str, Any],
-                 n_embed: int = 8192,
-                 embed_dim: int = 32,
-                 decay: float = 0.99,
-                 quantize_kmeans_init: bool =True,
-                 decoder_out_dim: int = 200,
-                 **kwargs
+                 cfg: ConfigVQNSP
+                 # **kwargs
                  ):
         super().__init__()
-        print(kwargs)
-        if decoder_config['in_chans'] != embed_dim:
-            print(f"Rewrite the in_chans in decoder from {decoder_config['in_chans']} to {embed_dim}")
-            decoder_config['in_chans'] = embed_dim
+        # print(kwargs)
+        if cfg.decoder.in_chans != cfg.codebook.emb_dim:
+            raise ValueError(f"Decoder input channels ({cfg.decoder.in_chans}) "
+                             f"must match codebook emd size ({cfg.codebook.emb_dim})")
+            # warn(f"Rewrite the in_chans in decoder from {cfg_decoder['in_chans']} to {cfg_encoder.embed_dim}")
+            # cfg_decoder['in_chans'] = cfg_encoder.embed_dim:
 
         # encoder & decode params
-        print('Final encoder config', encoder_config)
-        self.encoder = NeuralTransformer(**encoder_config)
+        print('Final encoder config', cfg.encoder)
+        self.encoder = NeuralTransformer(cfg.encoder)
 
-        print('Final decoder config', decoder_config)
-        self.decoder = NeuralTransformer(**decoder_config)
+        print('Final decoder config', cfg.decoder)
+        self.decoder = NeuralTransformer(cfg.decoder)
 
         # quantizer that matches encoder patches to codebook words
-        self.quantizer = NormEMAVectorQuantizer(
-            n_embed=n_embed,
-            embedding_dim=embed_dim,
-            beta=1.0,
-            kmeans_init=quantize_kmeans_init,
-            decay=decay,
-        )
+        self.quantizer = NormEMAVectorQuantizer(cfg.codebook)
 
-        self.patch_size = encoder_config['patch_size']
-        self.token_shape = (62, encoder_config['EEG_size'] // self.patch_size)
+        # self.patch_size = cfg_encoder['patch_size']
+        # self.token_shape = (62, cfg_encoder['EEG_size'] // cfg_encoder['patch_size'])
 
-        self.decoder_out_dim = decoder_out_dim
+        # self.decoder_out_dim = decoder_out_dim
 
         # embedding into quantization space
         # TODO: must changed in loading legacy names
         # self.encode_task_layer = EmbedderBlock(encoder_config['embed_dim'], embed_dim)
         self.encode_task_layer = nn.Sequential(
-            nn.Linear(encoder_config['embed_dim'], encoder_config['embed_dim']),
+            nn.Linear(cfg.encoder.embed_dim, cfg.encoder.embed_dim),
             nn.Tanh(),
-            nn.Linear(encoder_config['embed_dim'], embed_dim) # for quantize
+            nn.Linear(cfg.encoder.embed_dim, cfg.codebook.emb_dim)  # for quantize
         )
 
         # MLP prediction heads:
         self.decode_task_layer = nn.Sequential(
-            nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
+            nn.Linear(cfg.decoder.embed_dim, cfg.decoder.embed_dim),
             nn.Tanh(),
-            nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
+            nn.Linear(cfg.decoder.embed_dim, cfg.out_dim),
         ) # magnitude predictor
 
         self.decode_task_layer_angle = nn.Sequential(
-            nn.Linear(decoder_config['embed_dim'], decoder_config['embed_dim']),
+            nn.Linear(cfg.decoder.embed_dim, cfg.decoder.embed_dim),
             nn.Tanh(),
-            nn.Linear(decoder_config['embed_dim'], self.decoder_out_dim),
+            nn.Linear(cfg.decoder.embed_dim, cfg.out_dim),
         ) # phase predictor
 
-        self.kwargs = kwargs
+        # self.kwargs = kwargs
 
         self.encode_task_layer.apply(self._init_weights)
         self.decode_task_layer.apply(self._init_weights)

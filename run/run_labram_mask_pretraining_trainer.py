@@ -10,25 +10,26 @@
 
 import argparse
 import datetime
-import numpy as np
-import time
-import torch
-import torch.backends.cudnn as cudnn
 import json
 import os
-from typing import Optional
+import time
 from pathlib import Path
+from typing import Optional
 
+import numpy as np
+import torch
+import torch.backends.cudnn as cudnn
 from timm.models import create_model
 
-from utils import dist_utils
 from data import patch_datasets
 from models import models_io
+from models.masked_neural_transformer import NeuralTransformerForMEM
+from models.vqnsp_model import VQNSP
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
 from train.train_mask_pretraining import train_one_epoch
-from models.vqnsp_model import VQNSP
-from models.masked_neural_transformer import NeuralTransformerForMEM
+from utils import dist_utils
+
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM pre-training script', add_help=False)
@@ -39,7 +40,7 @@ def get_args():
     # tokenizer settings
     parser.add_argument("--tokenizer_weight", type=str)
     parser.add_argument("--tokenizer_model", type=str, default="vqnsp_encoder_base_decoder_3x200x12")
-    
+
     # Model parameters
     parser.add_argument('--model', default='labram_base_patch200_1600_8k_vocab', type=str, metavar='MODEL',
                         help='Name of model to train')
@@ -48,7 +49,7 @@ def get_args():
     parser.set_defaults(rel_pos_bias=False)
     parser.add_argument('--abs_pos_emb', action='store_true')
     parser.set_defaults(abs_pos_emb=True)
-    parser.add_argument('--layer_scale_init_value', default=0.1, type=float, 
+    parser.add_argument('--layer_scale_init_value', default=0.1, type=float,
                         help="0.1 for base, 1e-5 for large. set 0 to disable layer scale")
 
     parser.add_argument('--input_size', default=1600, type=int,
@@ -103,14 +104,14 @@ def get_args():
     parser.set_defaults(auto_resume=True)
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
-                        help='start epoch')    
+                        help='start epoch')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
                         help='')
     parser.set_defaults(pin_mem=True)
-    
+
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
@@ -123,7 +124,7 @@ def get_args():
     return parser.parse_args()
 
 
-def get_encoder_model(args)-> NeuralTransformerForMEM:
+def get_encoder_model(args) -> NeuralTransformerForMEM:
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -138,7 +139,8 @@ def get_encoder_model(args)-> NeuralTransformerForMEM:
 
     return model
 
-def get_vqnsp_model(args)-> Optional[VQNSP]:
+
+def get_vqnsp_model(args) -> Optional[VQNSP]:
     if args.use_tokenizer is False:
         print("No visual tokenizer is used!")
         return None
@@ -149,14 +151,15 @@ def get_vqnsp_model(args)-> Optional[VQNSP]:
         raise FileNotFoundError(f"Tokenizer model file {args.tokenizer_weight} does not exist")
 
     model = create_model(
-            args.tokenizer_model,
-            pretrained=True,
-            pretrained_weight=args.tokenizer_weight,
-            as_tokenzer=True,
-            n_code=args.codebook_size, 
-            code_dim=args.codebook_dim,
-        ).eval()
+        args.tokenizer_model,
+        pretrained=True,
+        pretrained_weight=args.tokenizer_weight,
+        as_tokenzer=True,
+        n_code=args.codebook_size,
+        code_dim=args.codebook_dim,
+    ).eval()
     return model
+
 
 def main(args):
     dist_utils.init_distributed_mode(args)
@@ -182,16 +185,19 @@ def main(args):
     # get dataset
     # datasets with the same montage can be packed within a sublist
     datasets_train = [
-        ["path/to/dataset1", "path/to/dataset2"], # e.g., 64 channels for dataset1 and dataset2
-        ["path/to/dataset3", "path/to/dataset4"], # e.g., 32 channels for dataset3 and dataset4
+        ["path/to/dataset1", "path/to/dataset2"],  # e.g., 64 channels for dataset1 and dataset2
+        ["path/to/dataset3", "path/to/dataset4"],  # e.g., 32 channels for dataset3 and dataset4
     ]
     # time window for each sublist in dataset_train
     # to ensure the total sequence length be around 256 for each dataset
     time_window = [
-        4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
-        8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
+        4,  # set the time window to 4 so that the sequence length is 4 * 64 = 256
+        8,  # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=800, start_percentage=0, end_percentage=1)
+    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window,
+                                                                                       stride_size=800,
+                                                                                       start_percentage=0,
+                                                                                       end_percentage=1)
     # prepare visual tokenizer
     vqnsp = get_vqnsp_model(args).to(device)
 
@@ -199,7 +205,8 @@ def main(args):
         num_tasks = dist_utils.get_world_size()
         global_rank = dist_utils.get_rank()
         sampler_rank = global_rank
-        num_training_steps_per_epoch = sum([len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
+        num_training_steps_per_epoch = sum(
+            [len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
 
         sampler_train_list = []
         for dataset in dataset_train_list:
@@ -243,7 +250,8 @@ def main(args):
     print("Number of training examples per epoch = %d" % (total_batch_size * num_training_steps_per_epoch))
 
     if args.distributed:
-        encoder_model = torch.nn.parallel.DistributedDataParallel(encoder_model, device_ids=[args.gpu], find_unused_parameters=True)
+        encoder_model = torch.nn.parallel.DistributedDataParallel(encoder_model, device_ids=[args.gpu],
+                                                                  find_unused_parameters=True)
         model_without_ddp = encoder_model.module
 
     optimizer = create_optimizer(
@@ -261,8 +269,9 @@ def main(args):
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
-    models_io.auto_load_model(
-        args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    models_io.auto_load_models(
+        args=args, model=encoder_model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+        loss_scaler=loss_scaler)
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()

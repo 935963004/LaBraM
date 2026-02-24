@@ -1,8 +1,9 @@
 import math
+
 import torch
 from timm.layers import trunc_normal_ as __call_trunc_normal_
-from torch import nn as nn
 from torch import Tensor
+from torch import nn as nn
 
 from layers.attention_blocks import Block
 from layers.patch_conv_blocks import TemporalConv
@@ -13,7 +14,8 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_norm=None, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=None, init_values=None, attn_head_dim=None,
-                 use_abs_pos_emb=True, use_rel_pos_bias=False, use_shared_rel_pos_bias=False, init_std=0.02):
+                 use_abs_pos_emb=True, use_rel_pos_bias=False, use_shared_rel_pos_bias=False,
+                 init_std=0.02, norm_eps=1e-6):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
 
@@ -39,7 +41,7 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
                 qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 init_values=init_values, window_size=self.patch_embed.patch_shape if use_rel_pos_bias else None,
-                attn_head_dim=attn_head_dim,
+                attn_head_dim=attn_head_dim, norm_eps=norm_eps
             )
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
@@ -193,11 +195,17 @@ class NeuralTransformerForMaskedEEGModeling(nn.Module):
 
 
 class NeuralTransformerForMEM(nn.Module):
-    def __init__(self, EEG_size=1600, patch_size=200, in_chans=1, out_chans=8, vocab_size=8192, embed_dim=200, depth=12,
-                 num_heads=10, mlp_ratio=4., qkv_bias=True, qk_norm=None, qk_scale=None, drop_rate=0.,
+    def __init__(self, EEG_size=1600,
+                 patch_size=200, in_chans=1,
+                 out_chans=8, vocab_size=8192,
+                 embed_dim=200, depth=12,
+                 num_heads=10,
+                 mlp_ratio=4.,
+                 qkv_bias=True, qk_norm=None, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=None, init_values=None, attn_head_dim=None,
-                 use_abs_pos_emb=True, use_rel_pos_bias=False, use_shared_rel_pos_bias=False, init_std=0.02, **kwargs):
+                 use_abs_pos_emb=True, use_rel_pos_bias=False,
+                 use_shared_rel_pos_bias=False, init_std=0.02, **kwargs):
         super().__init__()
         self.patch_size = patch_size
         self.student = NeuralTransformerForMaskedEEGModeling(EEG_size, patch_size, in_chans, out_chans, vocab_size,

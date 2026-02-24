@@ -4,12 +4,12 @@ from torch import nn as nn
 from torch.nn import functional as F
 
 from layers.mlp_blocks import Mlp
-
+from layers.norm_layers import get_norm_layer
 
 class Attention(nn.Module):
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_norm=None, qk_scale=None, attn_drop=0.,
-            proj_drop=0., window_size=None, attn_head_dim=None):
+            proj_drop=0., window_size=None, attn_head_dim=None, norm_eps=1e-6):
         """Initializes attention layer with configurable parameters with position encoding"""
         super().__init__()
         self.num_heads = num_heads
@@ -28,8 +28,8 @@ class Attention(nn.Module):
             self.v_bias = None
 
         if qk_norm is not None:
-            self.q_norm = qk_norm(head_dim)
-            self.k_norm = qk_norm(head_dim)
+            self.q_norm = get_norm_layer(qk_norm, dim=head_dim, eps=norm_eps)
+            self.k_norm = get_norm_layer(qk_norm, dim=head_dim, eps=norm_eps)
         else:
             self.q_norm = None
             self.k_norm = None
@@ -147,16 +147,18 @@ class Attention(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_norm=None, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., init_values=None, act_layer=nn.GELU, norm_layer=nn.LayerNorm,
-                 window_size=None, attn_head_dim=None):
+                 window_size=None, attn_head_dim=None, norm_eps=1e-6):
         """Initializes block with normalization, attention, MLP"""
         super().__init__()
-        self.norm1 = norm_layer(dim)
+        # norm_layer = get_norm_layer(norm_layer, dim=dim, eps=norm_eps)
+        self.norm1 = get_norm_layer(norm_layer, dim=dim, eps=norm_eps) # normalization of Atttention operation
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_norm=qk_norm, qk_scale=qk_scale,
-            attn_drop=attn_drop, proj_drop=drop, window_size=window_size, attn_head_dim=attn_head_dim)
+            attn_drop=attn_drop, proj_drop=drop, window_size=window_size,
+            attn_head_dim=attn_head_dim, norm_eps=norm_eps)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
+        self.norm2 = get_norm_layer(norm_layer, dim=dim, eps=norm_eps) # normalization of DropPath operation
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 

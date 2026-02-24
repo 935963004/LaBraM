@@ -10,22 +10,23 @@
 
 import argparse
 import datetime
-import numpy as np
-import time
-import torch
-import torch.backends.cudnn as cudnn
 import json
 import os
+import time
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.backends.cudnn as cudnn
 from timm.models import create_model
 
-from utils import dist_utils
 from data import patch_datasets
 from models import models_io
+from models.vqnsp_model import VQNSP
 from train import optimizers, logers
 from train.optimizers import create_optimizer, NativeScalerWithGradNormCount as NativeScaler
 from train.train_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
-from models.vqnsp_model import VQNSP
+from utils import dist_utils
 
 
 def get_args():
@@ -34,7 +35,8 @@ def get_args():
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--save_ckpt_freq', default=20, type=int)
     # Model parameters
-    parser.add_argument('--model', default='vqnsp_encoder_base_decoder_3x200x12', type=str, metavar='MODEL',  help='Name of model to train')  
+    parser.add_argument('--model', default='vqnsp_encoder_base_decoder_3x200x12', type=str, metavar='MODEL',
+                        help='Name of model to train')
 
     parser.add_argument('--codebook_n_emd', default=8192, type=int, metavar='MODEL',
                         help='number of codebook')
@@ -77,7 +79,7 @@ def get_args():
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
                         help='path where to tensorboard log')
-    
+
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
@@ -89,7 +91,7 @@ def get_args():
     parser.add_argument('--dist_eval', action='store_true', default=True,
                         help='Enabling distributed evaluation')
     parser.add_argument('--disable_eval', action='store_true', default=False)
-    
+
     parser.add_argument('--eval', action='store_true', default=False, help="Perform evaluation only")
     parser.add_argument('--calculate_codebook_usage', action='store_true', default=False)
 
@@ -101,7 +103,7 @@ def get_args():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem',
                         help='')
     parser.set_defaults(pin_mem=True)
-    
+
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
@@ -116,11 +118,11 @@ def get_visual_tokenizer(args, **kwargs) -> VQNSP:
     model = create_model(
         args.model,
         pretrained=False,
-        as_tokenzer=False,
-        n_code=args.codebook_n_emd,
-        code_dim=args.codebook_emd_dim,
-        EEG_size=args.input_size,
-        decay=args.ema_decay,
+        as_tokenizer=False,
+        num_codebook_tokens=args.codebook_n_emd,  # 8192
+        codebook_dim=args.codebook_emd_dim,
+        eeg_size=args.input_size,
+        decay_codebook=args.ema_decay,
         quantize_kmeans_init=args.quantize_kmeans_init
     )
     return model
@@ -146,16 +148,17 @@ def main(args):
     # get dataset
     # datasets with the same montage can be packed within a sublist
     datasets_train = [
-        ["path/to/dataset1", "path/to/dataset2"], # e.g., 64 channels for dataset1 and dataset2
-        ["path/to/dataset3", "path/to/dataset4"], # e.g., 32 channels for dataset3 and dataset4
+        ["path/to/dataset1", "path/to/dataset2"],  # e.g., 64 channels for dataset1 and dataset2
+        ["path/to/dataset3", "path/to/dataset4"],  # e.g., 32 channels for dataset3 and dataset4
     ]
     # time window for each sublist in dataset_train
     # to ensure the total sequence length be around 256 for each dataset
     time_window = [
-        4, # set the time window to 4 so that the sequence length is 4 * 64 = 256
-        8, # set the time window to 8 so that the sequence length is 8 * 32 = 256
+        4,  # set the time window to 4 so that the sequence length is 4 * 64 = 256
+        8,  # set the time window to 8 so that the sequence length is 8 * 32 = 256
     ]
-    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window, stride_size=200)
+    dataset_train_list, train_ch_names_list = patch_datasets.build_pretraining_dataset(datasets_train, time_window,
+                                                                                       stride_size=200)
 
     datasets_val = [
         ["path/to/datasets_val"]
@@ -169,7 +172,8 @@ def main(args):
         num_tasks = dist_utils.get_world_size()
         global_rank = dist_utils.get_rank()
         sampler_rank = global_rank
-        num_training_steps_per_epoch = sum([len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
+        num_training_steps_per_epoch = sum(
+            [len(dataset) for dataset in dataset_train_list]) // args.batch_size // num_tasks
 
         sampler_train_list = []
         for dataset in dataset_train_list:
@@ -266,20 +270,20 @@ def main(args):
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
 
-    models_io.auto_load_model(
+    models_io.auto_load_models(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-            
+
     if args.eval:
         test_stats = evaluate(data_loader_val, model, device, log_writer, 0, args=args)
         exit(0)
-        
+
     if args.calculate_codebook_usage:
         test_stats = calculate_codebook_usage(data_loader_val, model, device, log_writer, 0, args=args)
         exit(0)
-        
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-            
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             for data_loader_train in data_loader_train_list:
@@ -287,13 +291,13 @@ def main(args):
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch)
         train_stats = train_one_epoch(
-            model, 
+            model,
             data_loader_train_list,
-            optimizer, 
-            device, 
-            epoch, 
+            optimizer,
+            device,
+            epoch,
             loss_scaler,
-            args.clip_grad, 
+            args.clip_grad,
             log_writer=log_writer,
             start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values,
@@ -305,20 +309,22 @@ def main(args):
             models_io.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, save_ckpt_freq=args.save_ckpt_freq)
-        
+
         if data_loader_val_list is not None:
-            test_stats = evaluate(data_loader_val_list, model, device, log_writer, epoch, ch_names_list=val_ch_names_list, args=args)
-            print(f"Validation loss of the network on the {sum([len(dataset) for dataset in dataset_val_list])} test EEG: {test_stats['loss']:.4f}")
+            test_stats = evaluate(data_loader_val_list, model, device, log_writer, epoch,
+                                  ch_names_list=val_ch_names_list, args=args)
+            print(
+                f"Validation loss of the network on the {sum([len(dataset) for dataset in dataset_val_list])} test EEG: {test_stats['loss']:.4f}")
 
             if log_writer is not None:
                 log_writer.update(**test_stats, head="val/loss")
-                
+
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch, 'n_parameters': n_learnable_parameters}
+                         **{f'test_{k}': v for k, v in test_stats.items()},
+                         'epoch': epoch, 'n_parameters': n_learnable_parameters}
         else:
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        'epoch': epoch, 'n_parameters': n_learnable_parameters}
+                         'epoch': epoch, 'n_parameters': n_learnable_parameters}
 
         if args.output_dir and dist_utils.is_main_process():
             if log_writer is not None:

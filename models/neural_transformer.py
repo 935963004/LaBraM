@@ -1,97 +1,88 @@
 import math
 from typing import Optional, List, Dict, Set
+
 import torch
 from timm.layers import trunc_normal_
 from torch import nn as nn, Tensor
 
+from configs import ConfigNeuralTransformer, ClassifierTypes
 from layers.attention_blocks import Block
 from layers.mlp_blocks import MlpClassifier
+from layers.norm_layers import get_norm_layer
 from layers.patch_conv_blocks import TemporalConv, PatchEmbed
 
 
 class NeuralTransformer(nn.Module):
-    def __init__(self,
-                 EEG_size=1600,
-                 patch_size=200,
-                 in_chans=1,
-                 out_chans=8,
-                 num_classes=1000,
-                 embed_dim=200,
-                 depth=12,
-                 num_heads=10,
-                 mlp_ratio=4.,
-                 qkv_bias=False,
-                 qk_norm=None,
-                 qk_scale=None,
-                 drop_rate=0.,
-                 attn_drop_rate=0.,
-                 drop_path_rate=0.,
-                 norm_layer=nn.LayerNorm,
-                 init_values=None,
-                 use_abs_pos_emb=True,
-                 use_rel_pos_bias=False,
-                 use_shared_rel_pos_bias=False,
-                 use_mean_pooling=True,
-                 init_scale=0.001,
-                 classifier_type='linear',  # or 'mlp'
-                 **kwargs):
+    def __init__(self, cfg: ConfigNeuralTransformer, **kwargs):
         """Defines transformer with temporal convolution or patch embedding"""
         super().__init__()
-        self.num_classes = num_classes
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
-        self.use_mean_pooling = use_mean_pooling
+        self.cfg = cfg.update(**kwargs)
+        # self.num_classes = self.cfg.num_classes
+        # self.embed_dim = self.cfg.embed_dim
+        # self.num_features = self.cfg.embed_dim  # num_features for consistency with other models
+        # self.use_mean_pooling = use_mean_pooling
         # To identify whether it is neural tokenizer or neural decoder.
         # For the neural decoder, use linear projection (PatchEmbed) to project codebook dimension to hidden dimension.
         # Otherwise, use TemporalConv to extract temporal features from EEG signals.
-        self.patch_embed = TemporalConv(out_chans=out_chans) if in_chans == 1 else PatchEmbed(EEG_size=EEG_size,
-                                                                                              patch_size=patch_size,
-                                                                                              in_chans=in_chans,
-                                                                                              embed_dim=embed_dim)
-        self.time_window = EEG_size // patch_size
-        self.patch_size = patch_size
+        # qk_norm = get_norm_layer(self.cfg.qk_norm, dim=self.cfg.embed_dim, eps=self.cfg.norm_eps)
+        # norm_layer = get_norm_layer(self.cfg.norm_layer, dim=self.cfg.embed_dim, eps=self.cfg.norm_eps)
+        if self.cfg.in_chans == 1:
+            self.patch_embed = TemporalConv(out_chans=self.cfg.out_chans)
+        else:
+            self.patch_embed = PatchEmbed(EEG_size=self.cfg.eeg_size,
+                                          patch_size=self.cfg.patch_size,
+                                          in_chans=self.cfg.in_chans,
+                                          embed_dim=self.cfg.embed_dim)
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.patch_size = self.cfg.patch_size
+
+        self.time_window = self.cfg.eeg_size // self.patch_size
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.cfg.embed_dim))
         # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        if use_abs_pos_emb:
-            self.pos_embed = nn.Parameter(torch.zeros(1, 128 + 1, embed_dim), requires_grad=True)
+        if self.cfg.use_abs_pos_emb:
+            self.pos_embed = nn.Parameter(torch.zeros(1, 128 + 1, self.cfg.embed_dim),
+                                          requires_grad=True)
         else:
             self.pos_embed = None
-        self.time_embed = nn.Parameter(torch.zeros(1, 16, embed_dim), requires_grad=True)
-        self.pos_drop = nn.Dropout(p=drop_rate)
-
+        self.time_embed = nn.Parameter(torch.zeros(1, 16, self.cfg.embed_dim),
+                                       requires_grad=True)
+        self.pos_drop = nn.Dropout(p=self.cfg.drop_rate)
         self.rel_pos_bias = None
-
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        self.use_rel_pos_bias = use_rel_pos_bias
+        dpr = [x.item() for x in
+               torch.linspace(0, self.cfg.drop_path_rate, self.cfg.depth)]  # stochastic depth decay rule
+        # self.use_rel_pos_bias = use_rel_pos_bias
         self.blocks = nn.ModuleList([
             Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                qk_norm=qk_norm,
-                qk_scale=qk_scale,
-                drop=drop_rate,
-                attn_drop=attn_drop_rate,
+                dim=self.cfg.embed_dim,
+                num_heads=self.cfg.num_heads,
+                mlp_ratio=self.cfg.mlp_ratio,
+                qkv_bias=self.cfg.qkv_bias,
+                qk_norm=self.cfg.qk_norm,
+                qk_scale=self.cfg.qk_scale,
+                drop=self.cfg.drop_rate,
+                attn_drop=self.cfg.attn_drop_rate,
                 drop_path=dpr[i],
-                norm_layer=norm_layer,
-                init_values=init_values,
+                norm_layer=self.cfg.norm_layer,
+                init_values=self.cfg.init_values,
+                norm_eps=self.cfg.norm_eps,
                 window_size=None)
-            for i in range(depth)])
+            for i in range(self.cfg.depth)])
 
-        self.norm = norm_layer(embed_dim)  # nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
+        self.norm = get_norm_layer(self.cfg.norm_layer,
+                                   self.cfg.embed_dim)  # nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
 
-        if num_classes == 0:
+        if self.cfg.num_classes == 0:
             self.head = nn.Identity()
-        elif classifier_type == 'linear':
-            self.head = nn.Linear(embed_dim, num_classes)
-        elif classifier_type == 'mlp':
-            self.head = MlpClassifier(embed_dim,
+        elif self.cfg.classifier_type == ClassifierTypes.LINEAR:
+            self.head = nn.Linear(self.cfg.embed_dim, self.cfg.num_classes)
+        elif self.cfg.classifier_type == ClassifierTypes.MLP:
+            self.head = MlpClassifier(self.cfg.embed_dim,
                                       act_layer=nn.GELU,
-                                      num_classes=num_classes,
-                                      drop=drop_rate)
+                                      num_classes=self.cfg.num_classes,
+                                      drop=self.cfg.drop_rate)
         else:
-            raise ValueError(f'Invalid classifier type: {classifier_type}')
+            raise ValueError(f'Invalid classifier type: {self.cfg.classifier_type}')
 
         if self.pos_embed is not None:
             trunc_normal_(self.pos_embed, std=.02)
@@ -105,8 +96,8 @@ class NeuralTransformer(nn.Module):
         self.fix_init_weight()
 
         if isinstance(self.head, nn.Linear):
-            self.head.weight.data.mul_(init_scale)
-            self.head.bias.data.mul_(init_scale)
+            self.head.weight.data.mul_(self.cfg.init_scale)
+            self.head.bias.data.mul_(self.cfg.init_scale)
 
     def forward(self,
                 x: Tensor,
@@ -124,7 +115,7 @@ class NeuralTransformer(nn.Module):
         patch_tokens = x[:, 1:]
         cls_token = x[:, 0]
 
-        if self.use_mean_pooling:
+        if self.cfg.use_mean_pooling:
             features_pred = patch_tokens.mean(1)
         else:
             features_pred = cls_token
@@ -185,16 +176,17 @@ class NeuralTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def get_num_layers(self):
+    @property
+    def num_layers(self) -> int:
         return len(self.blocks)
 
     @torch.jit.ignore
     def no_weight_decay(self) -> Set[str]:
         return {'pos_embed', 'cls_token', 'time_embed'}
 
-    def reset_classifier(self, num_classes, global_pool=''):
-        self.num_classes = num_classes
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+    def reset_classifier(self, num_classes: int, global_pool=''):
+        self.cfg.num_classes = num_classes
+        self.head = nn.Linear(self.cfg.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
 
 

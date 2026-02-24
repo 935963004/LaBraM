@@ -1,3 +1,4 @@
+from typing import List
 
 # Canonical EEG channel names from TUAB/TUH datasets that were
 # used in training of the mode
@@ -15,7 +16,8 @@ STANDARD_1020 = [
     'CFC1', 'CFC2', 'CFC3', 'CFC4', 'CFC5', 'CFC6', 'CFC7', 'CFC8', \
     'CCP1', 'CCP2', 'CCP3', 'CCP4', 'CCP5', 'CCP6', 'CCP7', 'CCP8', \
     'T1', 'T2', 'FTT9h', 'TTP7h', 'TPP9h', 'FTT10h', 'TPP8h', 'TPP10h', \
-    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
+    "FP1-F7", "F7-T7", "T7-P7", "P7-O1", "FP2-F8", "F8-T8", "T8-P8", \
+    "P8-O2", "FP1-F3", "F3-C3", "C3-P3", "P3-O1",
     "FP2-F4", "F4-C4", "C4-P4", "P4-O2"
 ]
 DEFAULT_SAMPLING_RATE = 200
@@ -24,7 +26,7 @@ MIN_DATA_LENGTH = 100
 MIN_LEN_SEC = 10 * 60
 
 
-def get_chans(ch_names):
+def get_chans(ch_names: List[str]) -> List[int]:
     chans = []
     for ch_name in ch_names:
         chans.append(STANDARD_1020.index(ch_name))

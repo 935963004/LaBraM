@@ -10,11 +10,11 @@
 import json
 import math
 from math import inf
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-from timm.optim import NAdam
 from timm.optim import RAdam
 from timm.optim.adafactor import Adafactor
 from timm.optim.adahessian import Adahessian
@@ -24,13 +24,17 @@ from timm.optim.nvnovograd import NvNovoGrad
 from timm.optim.rmsprop_tf import RMSpropTF
 from timm.optim.sgdp import SGDP
 from torch import optim as optim
+# from torch.optim.optimizer import Optimizer
+from torch.optim import NAdam
 
 try:
     from apex.optimizers import FusedNovoGrad, FusedAdam, FusedLAMB, FusedSGD
+
     has_apex = True
 except ImportError:
     has_apex = False
 
+from configs.config_optimizer import ConfigClassifierOptimizer
 
 
 class LayerDecayValueAssigner(object):
@@ -44,23 +48,26 @@ class LayerDecayValueAssigner(object):
         return _get_num_layer_for_vit(var_name, len(self.values))
 
 
-def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=None, get_layer_scale=None, **kwargs):
+def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=None, get_layer_scale=None, filter_name: List[str] = None, **kwargs):
     parameter_group_names = {}
     parameter_group_vars = {}
-
+    if filter_name is None:
+        filter_name = []
+    else:
+        print(f"Filter layers: {filter_name}")
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue  # frozen weights
-        if len(kwargs.get('filter_name', [])) > 0:
+        if len(filter_name) > 0:
             flag = False
-            for filter_n in kwargs.get('filter_name', []):
+            for filter_n in filter_name:
                 if filter_n in name:
                     print(f"filter {name} because of the pattern {filter_n}")
                     flag = True
                     param.requires_grad = False
             if flag:
                 continue
-        if param.ndim <= 1 or name.endswith(".bias") or name in skip_list: # param.ndim <= 1 len(param.shape) == 1
+        if param.ndim <= 1 or name.endswith(".bias") or name in skip_list:  # param.ndim <= 1 len(param.shape) == 1
             group_name = "no_decay"
             this_weight_decay = 0.
         else:
@@ -95,9 +102,14 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
     return list(parameter_group_vars.values())
 
 
-def create_optimizer(args, model: nn.Module, get_num_layer=None, get_layer_scale=None, filter_bias_and_bn=True, skip_list=None, **kwargs):
-    opt_lower = args.opt.lower()
-    weight_decay = args.weight_decay
+def create_optimizer(cfg: ConfigClassifierOptimizer,
+                     model: nn.Module,
+                     get_num_layer=None,
+                     get_layer_scale=None,
+                     filter_bias_and_bn=True,
+                     skip_list=None, **kwargs) -> optim.Optimizer:
+    opt_lower = cfg.optimizer_type.lower()
+    weight_decay = cfg.weight_decay
     if weight_decay and filter_bias_and_bn:
         skip = {}
         if skip_list is not None:
@@ -105,7 +117,8 @@ def create_optimizer(args, model: nn.Module, get_num_layer=None, get_layer_scale
         elif hasattr(model, 'no_weight_decay'):
             skip = model.no_weight_decay()
         print(f"Skip weight decay name marked in model: {skip}")
-        parameters = get_parameter_groups(model, weight_decay, skip, get_num_layer, get_layer_scale, **kwargs)
+        parameters = get_parameter_groups(model, weight_decay, skip, get_num_layer, get_layer_scale,
+                                          filter_name=cfg.filter_layers, **kwargs)
         weight_decay = 0.
     else:
         parameters = model.parameters()
@@ -113,21 +126,21 @@ def create_optimizer(args, model: nn.Module, get_num_layer=None, get_layer_scale
     if 'fused' in opt_lower:
         assert has_apex and torch.cuda.is_available(), 'APEX and CUDA required for fused optimizers'
 
-    opt_args = dict(lr=args.lr, weight_decay=weight_decay)
-    if hasattr(args, 'opt_eps') and args.opt_eps is not None:
-        opt_args['eps'] = args.opt_eps
-    if hasattr(args, 'opt_betas') and args.opt_betas is not None:
-        opt_args['betas'] = args.opt_betas
-    
+    opt_args = dict(lr=cfg.lr, weight_decay=weight_decay)
+    if cfg.eps is not None:
+        opt_args['eps'] = cfg.eps
+    if cfg.betas is not None:
+        opt_args['betas'] = cfg.betas
+
     print('Optimizer config:', opt_args)
     opt_split = opt_lower.split('_')
     opt_lower = opt_split[-1]
     if opt_lower == 'sgd' or opt_lower == 'nesterov':
         opt_args.pop('eps', None)
-        optimizer = optim.SGD(parameters, momentum=args.momentum, nesterov=True, **opt_args)
+        optimizer = optim.SGD(parameters, momentum=cfg.momentum, nesterov=True, **opt_args)
     elif opt_lower == 'momentum':
         opt_args.pop('eps', None)
-        optimizer = optim.SGD(parameters, momentum=args.momentum, nesterov=False, **opt_args)
+        optimizer = optim.SGD(parameters, momentum=cfg.momentum, nesterov=False, **opt_args)
     elif opt_lower == 'adam':
         optimizer = optim.Adam(parameters, **opt_args)
     elif opt_lower == 'adamw':
@@ -139,27 +152,27 @@ def create_optimizer(args, model: nn.Module, get_num_layer=None, get_layer_scale
     elif opt_lower == 'adamp':
         optimizer = AdamP(parameters, wd_ratio=0.01, nesterov=True, **opt_args)
     elif opt_lower == 'sgdp':
-        optimizer = SGDP(parameters, momentum=args.momentum, nesterov=True, **opt_args)
+        optimizer = SGDP(parameters, momentum=cfg.momentum, nesterov=True, **opt_args)
     elif opt_lower == 'adadelta':
         optimizer = optim.Adadelta(parameters, **opt_args)
     elif opt_lower == 'adafactor':
-        if not args.lr:
-            opt_args['lr'] = None
+        # if not args.lr:
+        #     opt_args['lr'] = None
         optimizer = Adafactor(parameters, **opt_args)
     elif opt_lower == 'adahessian':
         optimizer = Adahessian(parameters, **opt_args)
     elif opt_lower == 'rmsprop':
-        optimizer = optim.RMSprop(parameters, alpha=0.9, momentum=args.momentum, **opt_args)
+        optimizer = optim.RMSprop(parameters, alpha=0.9, momentum=cfg.momentum, **opt_args)
     elif opt_lower == 'rmsproptf':
-        optimizer = RMSpropTF(parameters, alpha=0.9, momentum=args.momentum, **opt_args)
+        optimizer = RMSpropTF(parameters, alpha=0.9, momentum=cfg.momentum, **opt_args)
     elif opt_lower == 'nvnovograd':
         optimizer = NvNovoGrad(parameters, **opt_args)
     elif opt_lower == 'fusedsgd':
         opt_args.pop('eps', None)
-        optimizer = FusedSGD(parameters, momentum=args.momentum, nesterov=True, **opt_args)
+        optimizer = FusedSGD(parameters, momentum=cfg.momentum, nesterov=True, **opt_args)
     elif opt_lower == 'fusedmomentum':
         opt_args.pop('eps', None)
-        optimizer = FusedSGD(parameters, momentum=args.momentum, nesterov=False, **opt_args)
+        optimizer = FusedSGD(parameters, momentum=cfg.momentum, nesterov=False, **opt_args)
     elif opt_lower == 'fusedadam':
         optimizer = FusedAdam(parameters, adam_w_mode=False, **opt_args)
     elif opt_lower == 'fusedadamw':

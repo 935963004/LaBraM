@@ -6,9 +6,13 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-from torch import Tensor
+from timm.utils import ModelEma
 from timm.utils import get_state_dict
+from torch import Tensor
+from torch.optim.optimizer import Optimizer
 
+from configs import ConfigRunClassifierModel
+from train.optimizers import NativeScalerWithGradNormCount as NativeScaler
 from utils.dist_utils import save_on_master
 
 
@@ -90,7 +94,8 @@ def load_state_dict(model: nn.Module,
         print('\n'.join(error_msgs))
 
 
-def save_model(output_dir: str, args,
+def save_model(output_dir: str,
+               cfg: ConfigRunClassifierModel,
                epoch: int,
                model: nn.Module,
                model_without_ddp: nn.Module,
@@ -104,7 +109,7 @@ def save_model(output_dir: str, args,
     output_dir.mkdir(parents=True, exist_ok=True)
     epoch_name = str(epoch)
 
-    if not getattr(args, 'enable_deepspeed', False):
+    if not cfg.train.enable_deepspeed:
         checkpoint_paths = [output_dir / 'checkpoint.pth']
         if epoch == 'best':
             checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch_name), ]
@@ -117,7 +122,7 @@ def save_model(output_dir: str, args,
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
                 # 'scaler': loss_scaler.state_dict(),
-                'args': args,
+                'cfg': cfg.as_dict(),
             }
             if loss_scaler is not None:
                 to_save['scaler'] = loss_scaler.state_dict()
@@ -129,68 +134,79 @@ def save_model(output_dir: str, args,
                 to_save['optimizer_disc'] = optimizer_disc.state_dict()
 
             save_on_master(to_save, checkpoint_path)
+
+
     else:
         client_state = {'epoch': epoch}
         if model_ema is not None:
             client_state['model_ema'] = get_state_dict(model_ema)
-        model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
+        model.save_checkpoint(save_dir=output_dir,
+                              tag="checkpoint-%s" % epoch_name,
+                              client_state=client_state)
 
 
-def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None, optimizer_disc=None):
-    output_dir = Path(args.output_dir)
-
-    if not getattr(args, 'enable_deepspeed', False):
+def auto_load_models(cfg: ConfigRunClassifierModel,
+                     model: nn.Module,
+                     model_without_ddp: nn.Module,
+                     optimizer: Optimizer,
+                     loss_scaler: NativeScaler,
+                     model_ema: Optional[ModelEma] = None,
+                     optimizer_disc=None):
+    load_dir = cfg.train.resume_ckpt_path
+    file_path_ckpt = None
+    # cfg.train.enable_deepspeed
+    if not cfg.train.enable_deepspeed:
         # torch.amp
-        if args.auto_resume and len(args.resume) == 0:
-            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint.pth'))
+        if cfg.train.auto_resume and load_dir is not None:
+            all_checkpoints = glob.glob(os.path.join(load_dir, 'checkpoint.pth'))
             if len(all_checkpoints) > 0:
-                args.resume = os.path.join(output_dir, 'checkpoint.pth')
+                file_path_ckpt = os.path.join(load_dir, 'checkpoint.pth')
             else:
-                all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*.pth'))
+                all_checkpoints = glob.glob(os.path.join(load_dir, 'checkpoint-*.pth'))
                 latest_ckpt = -1
                 for ckpt in all_checkpoints:
                     t = ckpt.split('-')[-1].split('.')[0]
                     if t.isdigit():
                         latest_ckpt = max(int(t), latest_ckpt)
                 if latest_ckpt >= 0:
-                    args.resume = os.path.join(output_dir, 'checkpoint-%d.pth' % latest_ckpt)
-            print("Auto resume checkpoint: %s" % args.resume)
+                    file_path_ckpt = os.path.join(load_dir, 'checkpoint-%d.pth' % latest_ckpt)
+            print("Auto resume checkpoint: %s" % file_path_ckpt)
 
-        if args.resume:
-            if args.resume.startswith('https'):
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    args.resume, weights_only=False, check_hash=True)
-            else:
-                checkpoint = torch.load(args.resume, weights_only=False)
-            model_without_ddp.load_state_dict(checkpoint['model'])  # strict: bool=True, , strict=False
-            print("Resume checkpoint %s" % args.resume)
-            if 'optimizer' in checkpoint and 'epoch' in checkpoint:
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                print(f"Resume checkpoint at epoch {checkpoint['epoch']}")
-                args.start_epoch = 1  # checkpoint['epoch'] + 1
-                if hasattr(args, 'model_ema') and args.model_ema:
-                    _load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
-                if 'scaler' in checkpoint:
-                    loss_scaler.load_state_dict(checkpoint['scaler'])
-                print("With optim & sched!")
-            if 'optimizer_disc' in checkpoint:
-                optimizer_disc.load_state_dict(checkpoint['optimizer_disc'])
+            if file_path_ckpt:
+                if file_path_ckpt.startswith('https'):
+                    checkpoint = torch.hub.load_state_dict_from_url(
+                        file_path_ckpt, weights_only=False, check_hash=True)
+                else:
+                    checkpoint = torch.load(file_path_ckpt, weights_only=False)
+                model_without_ddp.load_state_dict(checkpoint['model'])  # strict: bool=True, , strict=False
+                print("Resume checkpoint %s" % file_path_ckpt)
+                if 'optimizer' in checkpoint and 'epoch' in checkpoint:
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                    print(f"Resume checkpoint at epoch {checkpoint['epoch']}")
+                    cfg.train.start_epoch = 1  # checkpoint['epoch'] + 1
+                    if cfg.train.model_ema:
+                        _load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
+                    if 'scaler' in checkpoint:
+                        loss_scaler.load_state_dict(checkpoint['scaler'])
+                    print("With optim & sched!")
+                if 'optimizer_disc' in checkpoint:
+                    optimizer_disc.load_state_dict(checkpoint['optimizer_disc'])
     else:
         # deepspeed, only support '--auto_resume'.
-        if args.auto_resume:
-            all_checkpoints = glob.glob(os.path.join(output_dir, 'checkpoint-*'))
+        if cfg.train.auto_resume:
+            all_checkpoints = glob.glob(os.path.join(load_dir, 'checkpoint-*'))
             latest_ckpt = -1
             for ckpt in all_checkpoints:
                 t = ckpt.split('-')[-1].split('.')[0]
                 if t.isdigit():
                     latest_ckpt = max(int(t), latest_ckpt)
             if latest_ckpt >= 0:
-                args.resume = os.path.join(output_dir, 'checkpoint-%d' % latest_ckpt)
+                file_path_ckpt = os.path.join(load_dir, 'checkpoint-%d' % latest_ckpt)
                 print("Auto resume checkpoint: %d" % latest_ckpt)
-                _, client_states = model.load_checkpoint(args.output_dir, tag='checkpoint-%d' % latest_ckpt)
-                args.start_epoch = client_states['epoch'] + 1
+                _, client_states = model.load_checkpoint(file_path_ckpt, tag='checkpoint-%d' % latest_ckpt)
+                cfg.train.start_epoch = client_states['epoch'] + 1
                 if model_ema is not None:
-                    if args.model_ema:
+                    if cfg.train.use_ema:
                         _load_checkpoint_for_ema(model_ema, client_states['model_ema'])
 
 def _load_checkpoint_for_ema(model_ema, checkpoint):

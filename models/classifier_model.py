@@ -1,73 +1,61 @@
-from typing import Dict, List, Tuple, Any, Optional, Set
-import torch
-import enum
 import warnings
-from einops import rearrange
+from typing import Dict, List, Set
+
+import torch
 from timm.layers import trunc_normal_
 from torch import nn, Tensor
 
+from configs import FeaturesType, ConfigEEGClassifier, ClassifierTypes
+from layers.embedding_blocks import FeatureEmbedder, CodeBookBagEmbedder
+from layers.mlp_blocks import MlpClassifier
 from models.codebook_quantizer import NormEMAVectorQuantizer
 from models.vqnsp_model import VQNSP, NeuralTransformer
-from layers.mlp_blocks import MlpClassifier
-from layers.embedding_blocks import FeatureEmbedder, CodeBookBagEmbedder
 
 
-class FeaturesTypes(enum.Enum):
-    PATCH_TOKENS = "patch_tokens"
-    CLS_TOKEN = "cls_token"
-    QUANTIZE_TOKENS = "quantize_tokens"
-    BAG_OF_CODES = "codebook_ind"
 
-    @classmethod
-    def values(cls):
-        return [member.value for member in cls]
-
-    @classmethod
-    def names(cls):
-        return [member.name  for member in cls]
 
 class NeurolCodebookClassifier(nn.Module):
     def __init__(self,
-                 vqnsp_model: VQNSP,
-                 encoder_model: NeuralTransformer,
-                 num_classes: int = 10,
-                 classifier_type: str = 'linear', # or 'mlp'
-                 drop_rate: float = 0.0,
-                 feature_space: List[FeaturesTypes] = [FeaturesTypes.PATCH_TOKENS.value],
-                 features_emb_dim: int = 128,
-                 norm_embedding: bool = True,
-                 update_codebook: bool = True,
+                 vqnsp: VQNSP,
+                 encoder: NeuralTransformer,
+                 cfg: ConfigEEGClassifier,
+                 # num_classes: int = 10,
+                 # classifier_type: str = 'linear', # or 'mlp'
+                 # drop_rate: float = 0.0,
+                 # feature_space: List[FeaturesType] = [FeaturesType.PATCH_TOKENS.value],
+                 # features_emb_dim: int = 128,
+                 # norm_embedding: bool = True,
+                 # update_codebook: bool = True,
                  **kwargs
                  ):
         super().__init__()
-        self.vqnsp_model: VQNSP = vqnsp_model
-        self.vqnsp_model.encoder = encoder_model
-        self.vqnsp_model.quantizer.update_codebook = update_codebook
+        self.vqnsp: VQNSP = vqnsp
+        self.vqnsp.encoder = encoder
+        self.vqnsp.quantizer.update_codebook = cfg.update_codebook
 
-        self.feature_space = feature_space
-        self.features_emb_dim=features_emb_dim
-        self.embedders: nn.ModuleDict = self.build_features_embedders(features_emb_dim)
-        self.features_dim = features_emb_dim * len(self.feature_space)
+        self.feature_space = cfg.feature_space
+        self.features_emb_dim = cfg.features_emb_dim
+        self.embedders: nn.ModuleDict = self.build_features_embedders(self.features_emb_dim)
+        self.features_dim = self.features_emb_dim * len(self.feature_space)
         if self.features_dim == 0:
             raise ValueError("No feature space specified for the classifier model.")
 
-        self.norm_emb = nn.LayerNorm(self.features_dim) if norm_embedding else nn.Identity()
-        if num_classes == 0:
+        self.norm_emb = nn.LayerNorm(self.features_dim) if cfg.norm_embedding else nn.Identity()
+        if cfg.num_classes == 0:
             self.classifier_head = nn.Identity()
             warnings.warn("No classifier head specified for the classifier model.")
-        elif classifier_type == 'linear':
-            self.classifier_head = nn.Linear(self.features_dim, num_classes)
-        elif classifier_type == 'mlp':
+        elif cfg.classifier_type == ClassifierTypes.LINEAR:
+            self.classifier_head = nn.Linear(self.features_dim, cfg.num_classes)
+        elif cfg.classifier_type == ClassifierTypes.MLP:
             self.classifier_head = MlpClassifier(self.features_dim,
                                       act_layer=nn.GELU,
-                                      num_classes=num_classes,
-                                      drop=drop_rate)
+                                                 num_classes=cfg.num_classes,
+                                                 drop=cfg.drop_rate)
         else:
-            raise ValueError(f'Invalid classifier type: {classifier_type}')
+            raise ValueError(f'Invalid classifier type: {cfg.classifier_type}')
 
-
-    def forward(self, x: Tensor, input_chans: List[str] = None, **kwargs) -> Tensor:
-        decoder_out, encoder_out = self.vqnsp_model(x, input_chans, **kwargs)
+    def forward(self, x: Tensor, input_chans: List[str] = None, **kwargs) -> [Tensor, Tensor, Tensor]:
+        decoder_out, encoder_out = self.vqnsp(x, input_chans, **kwargs)
         features = self.calculate_classify_features(encoder_out, decoder_out)
         features = self.norm_emb(features)
         pred_out = self.classifier_head(features)
@@ -80,24 +68,24 @@ class NeurolCodebookClassifier(nn.Module):
             raise ValueError("No feature space specified for the classifier model.")
 
         for feature_type in self.feature_space:
-            if feature_type == FeaturesTypes.PATCH_TOKENS.value:
-                embedders[feature_type] = FeatureEmbedder(in_dim=self.vqnsp_model.encoder.embed_dim,
+            if feature_type == FeaturesType.PATCH_TOKENS.value:
+                embedders[feature_type] = FeatureEmbedder(in_dim=self.vqnsp.encoder.embed_dim,
                                                           out_dim=embed_dim,
                                                           reduce_dim=1)
-            elif feature_type == FeaturesTypes.QUANTIZE_TOKENS.value:
-                embedders[feature_type] = FeatureEmbedder(in_dim=self.vqnsp_model.quantizer.codebook_dim,
+            elif feature_type == FeaturesType.QUANTIZE_TOKENS.value:
+                embedders[feature_type] = FeatureEmbedder(in_dim=self.vqnsp.quantizer.codebook_dim,
                                                           out_dim=embed_dim,
                                                           reduce_dim=1)
-            elif feature_type == FeaturesTypes.CLS_TOKEN.value:
-                embedders[feature_type] = FeatureEmbedder(self.vqnsp_model.encoder.embed_dim,
+            elif feature_type == FeaturesType.CLS_TOKEN.value:
+                embedders[feature_type] = FeatureEmbedder(self.vqnsp.encoder.cfg.embed_dim,
                                                           out_dim=embed_dim,
                                                           reduce_dim=None)
-            elif feature_type == FeaturesTypes.BAG_OF_CODES.value:
-                embedders[feature_type] = CodeBookBagEmbedder(self.vqnsp_model.quantizer.num_tokens,
+            elif feature_type == FeaturesType.BAG_OF_CODES.value:
+                embedders[feature_type] = CodeBookBagEmbedder(self.vqnsp.quantizer.cfg.num_tokens,
                                                               out_dim=embed_dim)
             else:
                 raise ValueError(f'Invalid feature type: {feature_type} '
-                                 f'supported types: {FeaturesTypes.values()}')
+                                 f'supported types: {FeaturesType.values()}')
         return embedders
 
     def calculate_classify_features(self,
@@ -109,9 +97,9 @@ class NeurolCodebookClassifier(nn.Module):
             if feature_type not in encoder_features.keys():
                 raise ValueError(f'Feature type {feature_type} not found in encoder features. '
                                  f'encoder_features includes only:{encoder_features.keys()}')
-            elif feature_type not in FeaturesTypes.values():
+            elif feature_type not in FeaturesType.values():
                 raise ValueError(f'Feature type {feature_type} not found in FeaturesTypes enum. '
-                                 f'Supported types: {FeaturesTypes.values()}')
+                                 f'Supported types: {FeaturesType.values()}')
 
             features_emb = self.embedders[feature_type](encoder_features[feature_type])
             if features_emb.shape[-1] != self.features_emb_dim:
@@ -124,23 +112,23 @@ class NeurolCodebookClassifier(nn.Module):
     def train(self, mode: bool = True, wo_codebook: bool = True):
         super().train(mode)
         if wo_codebook:
-            self.vqnsp_model.quantizer.eval()
+            self.vqnsp.quantizer.eval()
 
     @property
     def encoder(self)->NeuralTransformer:
-        return self.vqnsp_model.encoder
+        return self.vqnsp.encoder
 
     @property
     def quantizer(self)->NormEMAVectorQuantizer:
-        return self.vqnsp_model.quantizer
+        return self.vqnsp.quantizer
 
     @property
     def decoder(self)->NeuralTransformer:
-        return self.vqnsp_model.decoder
+        return self.vqnsp.decoder
 
     @property
     def patch_size(self)->int:
         return self.encoder.patch_size
 
     def no_weight_decay(self) -> Set[str]:
-        return self.vqnsp_model.no_weight_decay()
+        return self.vqnsp.no_weight_decay()

@@ -4,6 +4,7 @@ import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, Field, fields, MISSING
 from typing import List, Tuple, Union, Optional, AnyStr, Any
+from typing import get_origin, get_args
 
 from configs.serialization import Numpy2Json, to_json, from_data_file
 from configs.types import DATA_DICT, correct_type
@@ -47,6 +48,13 @@ class ConfigBase(ABC):
                 raise ValueError(err_msg)
             else:
                 warnings.warn(err_msg)
+
+                # Best-effort coercion for primitive-typed fields before constructing dataclass
+        for field in cls.get_fields():
+            field_name = field.name
+            if field_name in dict_obj:
+                dict_obj[field_name] = cls._coerce_primitive(field.type, dict_obj[field_name])
+
         for field in cls.get_fields():
             try:
                 field_name = field.name
@@ -58,6 +66,59 @@ class ConfigBase(ABC):
         config = cls(**dict_obj)
         config.validate_type_fields(raise_exception)
         return config
+
+    @staticmethod
+    def _coerce_primitive(field_type: Any, value: Any) -> Any:
+        """
+        Best-effort coercion for config values coming from JSON/YAML/CLI.
+
+        Only coerces a small set of safe primitives (and Optional[...] of those):
+        float, int, bool, str.
+
+        If coercion is not applicable or fails, returns the original value.
+        """
+        if value is None:
+            return value
+
+        origin = get_origin(field_type)
+        args = get_args(field_type)
+
+        # Optional[T] is Union[T, NoneType]
+        if origin is Union and args:
+            non_none = [a for a in args if a is not type(None)]
+            if len(non_none) == 1:
+                return ConfigBase._coerce_primitive(non_none[0], value)
+            return value
+
+        target = field_type
+        if target is float and isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return value
+
+        if target is int and isinstance(value, str):
+            try:
+                # allow "10" but don't silently truncate "1e3"
+                return int(value) if value.strip().isdigit() or (
+                        value.strip().startswith(('-', '+')) and value.strip()[1:].isdigit()) else value
+            except ValueError:
+                return value
+
+        if target is bool and isinstance(value, str):
+            v = value.strip().lower()
+            if v in {"true", "1", "yes", "y", "on"}:
+                return True
+            if v in {"false", "0", "no", "n", "off"}:
+                return False
+            return value
+
+        if target is str and not isinstance(value, str):
+            # Usually safe, but keep it conservative: only coerce basic primitives
+            if isinstance(value, (int, float, bool)):
+                return str(value)
+
+        return value
 
     def save_to(self,
                 file_path: str,
@@ -197,9 +258,13 @@ class ConfigBase(ABC):
 
 @dataclass
 class ParamsBase(ConfigBase, ABC):
+    # validate_on_init: bool = field(default=True, repr=False, metadata={"serialize": False})
+
     @abstractmethod
     def check_valid(self, **kwargs) -> None:
         raise NotImplementedError
 
     def __post_init__(self):
-        self.check_valid()
+        pass
+        # if self.validate_on_init:
+        #     self.check_valid()

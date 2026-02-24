@@ -11,13 +11,15 @@
 import math
 import sys
 from typing import Iterable
+
 import torch
 
 from data import eeg_consts
 from models.vqnsp_model import VQNSP
 from train.logers import MetricLogger, SmoothedValue
+from train.losses import get_vqnsp_losses
 from utils import dist_utils
-from train.losses import SpectralPatchedLoss, get_vqnsp_losses
+
 
 def train_one_epoch(model: VQNSP,
                     data_loader_list: Iterable,
@@ -59,7 +61,7 @@ def train_one_epoch(model: VQNSP,
 
             with torch.amp.autocast(device):
                 decoder_out, encoder_out = model(batch, input_chans=input_chans)
-                losses_out= get_vqnsp_losses(decoder_out, encoder_out)
+                losses_out = get_vqnsp_losses(decoder_out, encoder_out)
 
             loss_value = losses_out["total_loss"].item()
             if not math.isfinite(loss_value):
@@ -68,9 +70,8 @@ def train_one_epoch(model: VQNSP,
                 # utils.save_nan_model(args, model)
                 sys.exit(1)
 
-
             split = "train" if model.training else "val"
-            log_loss = {f'{split}/{name}':  val.detach().mean() for name, val in losses_out.items()}
+            log_loss = {f'{split}/{name}': val.detach().mean() for name, val in losses_out.items()}
 
             optimizer.zero_grad()
             # this attribute is added by timm on one optimizer (adahessian)
@@ -81,11 +82,11 @@ def train_one_epoch(model: VQNSP,
                                     parameters=model.parameters(),
                                     create_graph=is_second_order)
             loss_scale_value = loss_scaler.state_dict()["scale"]
-            
+
             torch.cuda.synchronize()
 
             metric_logger.update(loss=loss_value)
-            new_log_loss = {k.split('/')[-1]:v for k, v in log_loss.items() if k not in ['total_loss']}
+            new_log_loss = {k.split('/')[-1]: v for k, v in log_loss.items() if k not in ['total_loss']}
             metric_logger.update(**new_log_loss)
 
             min_lr = 10.
@@ -120,7 +121,7 @@ def train_one_epoch(model: VQNSP,
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-    
+
     # stat the codebook usage information
     if hasattr(model.module, 'quantize'):
         try:
@@ -155,17 +156,17 @@ def evaluate(data_loader_list,
             print("Reset the codebook statistic info in quantizer before testing")
         except:
             pass
-    
+
     for data_loader, ch_names in zip(data_loader_list, ch_names_list):
         input_chans = eeg_consts.get_input_chans(ch_names)
         for step, (batch) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-
             images = batch.float().to(device, non_blocking=True) / 100
             recon_out, encoder_out = model(images, input_chans=input_chans)
             loses_out = get_vqnsp_losses(recon_out, encoder_out)
             metric_logger.update(loss=loses_out["total_loss"].item())
 
-            new_log_loss = {k.split('/')[-1]:v.detach().mean() for k, v in loses_out.items() if k not in ['total_loss']}
+            new_log_loss = {k.split('/')[-1]: v.detach().mean() for k, v in loses_out.items() if
+                            k not in ['total_loss']}
         metric_logger.update(**new_log_loss)
 
     # gather the stats from all processes
@@ -187,6 +188,7 @@ def evaluate(data_loader_list,
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
 @torch.no_grad()
 def calculate_codebook_usage(data_loader, model, device, log_writer=None, epoch=None, args=None):
     metric_logger = MetricLogger(delimiter="  ")
@@ -195,7 +197,7 @@ def calculate_codebook_usage(data_loader, model, device, log_writer=None, epoch=
     # switch to evaluation mode
     model.eval()
     model_module = _get_torch_model(model)
-    
+
     codebook_num = args.codebook_n_emd
     codebook_cnt = torch.zeros(codebook_num, dtype=torch.float64).to(device)
 
@@ -206,12 +208,12 @@ def calculate_codebook_usage(data_loader, model, device, log_writer=None, epoch=
 
         outputs_gather_list = [torch.zeros_like(outputs) for _ in range(dist_utils.get_world_size())]
         torch.distributed.all_gather(outputs_gather_list, outputs)
-        all_tokens = torch.cat(outputs_gather_list, dim=0).view(-1) # [B * N * Ngpu, ]
-        
+        all_tokens = torch.cat(outputs_gather_list, dim=0).view(-1)  # [B * N * Ngpu, ]
+
         codebook_cnt += torch.bincount(all_tokens, minlength=codebook_num)
 
     # statistic
-    zero_cnt = (codebook_cnt == 0).sum() # 0
+    zero_cnt = (codebook_cnt == 0).sum()  # 0
     print(f"STAT:  {zero_cnt} tokens ({(zero_cnt / codebook_num) * 100}%) never are used in this codebook.")
 
 

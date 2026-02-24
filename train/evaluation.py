@@ -1,7 +1,9 @@
-from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
 from typing import Dict
 
-def get_metrics(output, target, metrics, is_binary, threshold=0.5)->Dict[str, float]:
+from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
+
+
+def get_metrics(output, target, metrics, is_binary, threshold=0.5) -> Dict[str, float]:
     if is_binary:
         if 'roc_auc' not in metrics or sum(target) * (
                 len(target) - sum(target)) != 0:  # to prevent all 0 or all 1 and raise the AUROC error

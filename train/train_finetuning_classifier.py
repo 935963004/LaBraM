@@ -10,43 +10,45 @@
 import math
 import sys
 from typing import Optional, List, Dict
+
 import numpy as np
+import pandas as pd
+import sklearn.metrics as sklearn_metrics
 import torch
 from einops import rearrange
-import sklearn.metrics as sklearn_metrics
 from timm.utils import ModelEma
 from torch import nn, Tensor
 from tqdm import tqdm
 
-from train.evaluation import get_metrics
-from train.logers import MetricLogger
-from train.optimizers import get_loss_scale_for_deepspeed
-from train.training_utils import SmoothedValue
+from configs.config_train import LossesWeightsConfig
 from data import eeg_consts
 from models.classifier_model import NeurolCodebookClassifier
+from train.evaluation import get_metrics
+from train.logers import MetricLogger
 from train.losses import get_vqnsp_losses, SpectralPatchedLoss
-import pandas as pd
+from train.optimizers import get_loss_scale_for_deepspeed
+from train.training_utils import SmoothedValue
+
 
 def train_class_batch(classify_model: NeurolCodebookClassifier,
-                      # encode_model: NeuralTransformer,
-                      # vqnsp_model: VQNSP,
+
                       samples: Tensor,
                       target: Tensor,
                       classif_loss: nn.Module,
                       recon_loss: nn.Module,
-                      ch_names: List[str]) -> tuple[Dict[str, Tensor], Tensor]:
+                      ch_names: List[str],
+                      losses_weights: LossesWeightsConfig) -> tuple[Dict[str, Tensor], Tensor]:
     batch_size, n_channels, n_samples, times = samples.shape
     pred_class, decoder_out, encoder_out = classify_model(samples, ch_names)
     loss_finetune_class = classif_loss(pred_class, target)
-    losses_vqnsp = get_vqnsp_losses(x_target=samples,
-                                    decoder_out=decoder_out,
-                                    encoder_out=encoder_out,
-                                    recon_loss=recon_loss)
 
-    loss_total = loss_finetune_class + losses_vqnsp['total_loss']
-    losses = losses_vqnsp
-    losses["total_loss"] = loss_total
-    losses["loss_class"] = loss_finetune_class
+    losses = get_vqnsp_losses(x_target=samples,
+                              decoder_out=decoder_out,
+                              encoder_out=encoder_out,
+                              recon_loss=recon_loss)
+
+    losses["classifier"] = loss_finetune_class
+    losses["total_loss"] = torch.cat([losses_weights[key] * val[None] for key, val in losses.items()]).sum()
 
     return losses, pred_class
 
@@ -68,7 +70,8 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
                     num_training_steps_per_epoch=None,
                     update_freq=None,
                     ch_names=None,
-                    is_binary=True
+                    is_binary=True,
+                    losses_weights: LossesWeightsConfig = None
                     ):
     input_chans = None
     if ch_names is not None:
@@ -87,7 +90,7 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
         optimizer.zero_grad()
 
     for data_iter_step, data_batch in tqdm(enumerate(metric_logger.log_every(data_loader, print_freq, header)),
-                                                      total=len(data_loader), desc=header):
+                                           total=len(data_loader), desc=header):
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
             continue
@@ -112,13 +115,15 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
             losses, output = train_class_batch(classify_model, eeg_data, targets,
                                                classif_loss=classifier_loss,
                                                ch_names=input_chans,
-                                               recon_loss=recon_loss)
+                                               recon_loss=recon_loss,
+                                               losses_weights=losses_weights)
         else:
             with torch.amp.autocast(device_type=device.type):
                 losses, output = train_class_batch(classify_model, eeg_data, targets,
                                                    classif_loss=classifier_loss,
                                                    ch_names=input_chans,
-                                                   recon_loss=recon_loss)
+                                                   recon_loss=recon_loss,
+                                                   losses_weights=losses_weights)
 
         loss_total = losses["total_loss"]
         loss_value = loss_total.item()
@@ -136,7 +141,7 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
                 # model.zero_grad()
                 # Deepspeed will call step() & model.zero_grad() automatic
                 if encoder_model_ema is not None:
-                    encoder_model_ema.update(classify_model.vqnsp_model.encoder)
+                    encoder_model_ema.update(classify_model.vqnsp.encoder)
             grad_norm = None
             loss_scale_value = get_loss_scale_for_deepspeed(classify_model)
         else:
@@ -149,7 +154,7 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
             if (data_iter_step + 1) % update_freq == 0:
                 optimizer.zero_grad()
                 if encoder_model_ema is not None:
-                    encoder_model_ema.update(classify_model.vqnsp_model.encoder)
+                    encoder_model_ema.update(classify_model.vqnsp.encoder)
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         if device.type == 'cuda':
@@ -161,11 +166,11 @@ def train_one_epoch(classify_model: NeurolCodebookClassifier,
 
         if is_binary:
             class_acc = get_metrics(torch.sigmoid(output).detach().cpu().float().numpy(),
-                                               targets.detach().cpu().float().numpy(), ["accuracy"], is_binary)[
+                                    targets.detach().cpu().float().numpy(), ["accuracy"], is_binary)[
                 "accuracy"]
         else:
             class_acc = (output.max(-1)[-1] == targets.squeeze()).float().mean()
-            
+
         # metric_logger.update(loss=loss_value)
         for key, loss_value in losses.items():
             metric_logger.meters[key].update(loss_value.item())
@@ -214,7 +219,8 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
                         ch_names: Optional[List[str]] = None,
                         metrics: Optional[List[str]] = None,
                         is_binary: bool = True,
-                        threshold: float =0.5)-> [Dict[str, float], pd.DataFrame, np.ndarray]:
+                        threshold: float = 0.5,
+                        losses_weights: LossesWeightsConfig = None) -> [Dict[str, float], pd.DataFrame, np.ndarray]:
     if metrics is None:
         metrics = ['acc']
     input_chans = None
@@ -224,10 +230,10 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
         classif_loss = torch.nn.BCEWithLogitsLoss()
     else:
         classif_loss = torch.nn.CrossEntropyLoss()
-    recon_loss = SpectralPatchedLoss()
+    recon_loss = SpectralPatchedLoss(freq_cutoff=losses_weights['frequency_cutoff'])
     recon_loss.to(device)
     metric_logger = MetricLogger(delimiter="  ")
-    #header = 'Test:'
+    # header = 'Test:'
 
     # switch to evaluation mode
     model.eval()
@@ -249,15 +255,16 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
         target_class_batch = target_class_batch.to(device, non_blocking=True)
         if is_binary:
             target_class_batch = target_class_batch.float().unsqueeze(-1)
-        
+
         # compute output
         with torch.amp.autocast(device_type=device.type):
             pred_out, decoder_out, encoder_out = model(x_eeg_batch, input_chans=input_chans)
             loss_classif = classif_loss(pred_out, target_class_batch)
             losses_batch = get_vqnsp_losses(x_eeg_batch, decoder_out, encoder_out, recon_loss)
-
+            losses_batch['classifier'] = loss_classif
+            losses_batch["total_loss"] = torch.cat(
+                [losses_weights[key] * val[None] for key, val in losses_batch.items()]).sum()
         # losses_batch["total_loss"] = loss_total
-        losses_batch["loss_class"] = loss_classif
 
         if is_binary:
             prob_class_batch = torch.sigmoid(pred_out).cpu()
@@ -279,21 +286,20 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
         for key, loss_value in losses_batch.items():
             metric_logger.meters[key].update(loss_value.item())
 
-        #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     for key, val in metric_logger.meters.items():
         print(f"***{key}: {val.global_avg:.3f}***")
 
-    
     pred_label = torch.cat(pred_label, dim=0).numpy()
     true_label = torch.cat(true_label, dim=0).numpy()
     id_key = np.concatenate(id_key)
     id_interval = np.concatenate(id_interval)
     results_df = pd.DataFrame({'id_key': id_key,
                                'id_interval': id_interval,
-                               'pred_label': pred_label[:,0],
-                               'true_label': true_label[:,0]})
+                               'pred_label': pred_label[:, 0],
+                               'true_label': true_label[:, 0]})
 
     eval_metrics = get_metrics(pred_label, true_label, metrics, is_binary, threshold=threshold)
 
