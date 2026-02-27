@@ -7,12 +7,19 @@ class FeatureEmbedder(nn.Module):
                  in_dim: int,
                  out_dim: int,
                  act_layer: Callable=nn.Tanh,
-                 reduce_dim: Optional[int]=None):
+                 reduce_dim: Optional[int]=None,
+                 is_linear: bool = False):
         super().__init__()
-        self.embedder= nn.Sequential(
-                                    nn.Linear(in_dim, in_dim),
-                                    act_layer(),
-                                    nn.Linear(in_dim, out_dim))
+        if is_linear:
+            if in_dim != out_dim:
+                self.embedder = nn.Linear(in_dim, out_dim)
+            else:
+                self.embedder = nn.Identity()
+        else:
+            self.embedder= nn.Sequential(
+                                        nn.Linear(in_dim, in_dim),
+                                        act_layer(),
+                                        nn.Linear(in_dim, out_dim))
         self.reduce_dim = reduce_dim
 
     def forward(self, x: Tensor) -> Tensor:

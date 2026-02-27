@@ -184,6 +184,7 @@ class ConfigEEGClassifier(ParamsBase):
     features_emb_dim: int = 128
     norm_embedding: bool = True
     update_codebook: bool = True
+    linear_embedding: bool = False
 
     name_encoder: str = 'labram_base_patch200_200'
     name_vqnsp: str = 'vqnsp_encoder_base_decoder_3x200x12'

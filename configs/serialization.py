@@ -73,6 +73,8 @@ def from_yaml(yaml_url: str) -> Any:
     return obj
 
 
-def to_yaml(obj: Any, output_path: str):
+def to_yaml(obj: Any, output_path: str)-> str:
     with open(output_path, 'w') as f:
         yaml.dump(obj, f)
+        return output_path
+
