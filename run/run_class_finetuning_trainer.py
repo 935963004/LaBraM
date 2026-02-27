@@ -9,6 +9,7 @@
 # ---------------------------------------------------------
 
 import argparse
+from argparse import Namespace
 import datetime
 import json
 import os
@@ -44,9 +45,9 @@ from utils import dist_utils
 from models.registry_finetune_classifiers import *
 from models.registry_vqnsp_models import *
 
-def get_default_cfg(**kwargs) -> ConfigRunClassifierModel:
+def get_default_cfg(labram_asis: bool = False) -> ConfigRunClassifierModel:
     cfg = ConfigRunClassifierModel()
-    cfg.train.epochs = 50
+    cfg.train.epochs = 30
     cfg.train.warmup_epochs = 5
     cfg.train.update_freq = 1
     cfg.train.save_ckpt_freq = 5
@@ -59,21 +60,35 @@ def get_default_cfg(**kwargs) -> ConfigRunClassifierModel:
 
     # cfg.log.ckpt_dir = "./checkpoints/"
     # cfg.log.log_dir = "./logs/"
-    cfg.log.experiment = "finetune_INTERNAL_dim64_lastlayer"
+    cfg.log.experiment = "finetune_dim64_2lastlayers_CLS_Bags_PATCH"
+    cfg.train.losses_weights.classifier = 5.0
+    if labram_asis:
+        cfg.log.experiment = "labram_asis"
+        cfg.train.losses_weights.classifier=1.0
+        cfg.train.losses_weights.magnitude_recon = 0.0
+        cfg.train.losses_weights.phase_recon =0.0
+        cfg.train.losses_weights.quantize_err =0.0
+
+
 
     cfg.data.batch_size_train = 128
     cfg.data.batch_size_val = 128
     cfg.data.ds_name = "INTERNAL"
+    cfg.data.data_split = [0.8, 0.2, 0.0]
+    cfg.data.fold_split_path = None #"./checkpoints/finetune_dim64_2lastlayers_CLS_Bags_PATCH_INTERNAL_20260226-191127/fold_split_ids.yaml"
 
     cfg.model.name_encoder = 'labram_base_patch200_200'
     cfg.model.name_vqnsp = 'vqnsp_encoder_base_decoder_3x200x12'
     cfg.model.weights_vqnsp_path = "./checkpoints/vqnsp.pth"
     cfg.model.weights_classifier_path = "./checkpoints/labram-base.pth"
     cfg.model.feature_space = [FeaturesType.CLS_TOKEN.value,
-                               FeaturesType.BAG_OF_CODES.value]
-    cfg.model.classifier_type = ClassifierTypes('mlp').value
+                               FeaturesType.BAG_OF_CODES.value,
+                               FeaturesType.PATCH_TOKENS.value]
+
+    cfg.model.classifier_type = ClassifierTypes.MLP.value
     cfg.model.num_classes = 1
     cfg.model.features_emb_dim = 64
+    cfg.model.linear_embedding = False
 
     cfg.model.encoder.qkv_bias = True
     cfg.model.encoder.use_rel_pos_bias = True
@@ -87,7 +102,13 @@ def get_default_cfg(**kwargs) -> ConfigRunClassifierModel:
     cfg.model.encoder.num_classes = 0
     cfg.model.vqnsp = ConfigVQNSP(in_chans=1, num_tokens=8192, embed_dim=64)
 
-    cfg.optim.optimizer_type = OptimizerTypes('adamw').value
+    if labram_asis:
+        cfg.model.classifier_type = ClassifierTypes.LINEAR.value
+        cfg.model.features_emb_dim = cfg.model.encoder.embed_dim
+        cfg.model.feature_space = [FeaturesType.PATCH_TOKENS.value]
+        cfg.model.linear_embedding = True
+
+    cfg.optim.optimizer_type = OptimizerTypes.ADAMW.value
     cfg.optim.eps = 1e-8
     cfg.optim.opt_betas = None
     cfg.optim.clip_grad = 1.0
@@ -103,11 +124,16 @@ def get_default_cfg(**kwargs) -> ConfigRunClassifierModel:
     cfg.optim.smoothing = 0.1
     cfg.optim.disable_weight_decay_on_rel_pos_bias = True
 
-    blocks_filter = [f"encoder.blocks.{i}." for i in range(cfg.model.encoder.depth - 2)]
-    filter_opt = ["cls_token", "patch_embed", "pos_embed", "time_embed", "quantizer", "decoder",
-                  "encode_task_layer", "decode_task_layer"] + \
+    decoder_layers = ["quantizer", "decoder",
+                  "encode_task_layer", "decode_task_layer"]
+    train_last_layers = 2
+    blocks_filter = [f"encoder.blocks.{i}." for i in range(cfg.model.encoder.depth - train_last_layers -1)]
+    filter_opt = ["cls_token", "patch_embed", "pos_embed", "time_embed"] + decoder_layers + \
                  blocks_filter
-    cfg.optim.filter_layers = filter_opt
+    cfg.optim.filter_layers=filter_opt
+    if labram_asis:
+        cfg.optim.filter_layers = decoder_layers
+        cfg.optim.clip_grad = None
 
     return cfg
 
@@ -118,6 +144,8 @@ def get_args():
     parser.add_argument('--debug', action='store_true', help='run in debug mode')
     # run
     parser.add_argument('--run_config', default=None, type=str, help='Path to run configuration file(yaml/json)')
+    parser.add_argument('--cross_valid', action='store_true', help='run in cross validation mode')
+    parser.add_argument('--labram_asis', action='store_true', help='run in labram asis mode')
     # parser.add_argument('--batch_size', default=64, type=int)
     # parser.add_argument('--epochs', default=30, type=int)
     # parser.add_argument('--update_freq', default=1, type=int)
@@ -293,7 +321,7 @@ def get_args():
     return parser.parse_args(), ds_init
 
 
-def main(ds_init, cfg: str = None, debug: bool = False):
+def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labram_asis: bool = False):
     # args: argparse.Namespace
     # dist_utils.init_distributed_mode(args)
 
@@ -303,7 +331,7 @@ def main(ds_init, cfg: str = None, debug: bool = False):
     # print(args)
 
     if cfg is None or cfg == '':
-        cfg = get_default_cfg()
+        cfg = get_default_cfg(labram_asis=labram_asis)
     elif isinstance(cfg, str):
         if not os.path.isfile(cfg):
             raise ValueError(f"Config file {cfg} does not exist!")
@@ -331,7 +359,7 @@ def main(ds_init, cfg: str = None, debug: bool = False):
     # dataset_train, dataset_test, dataset_val: follows the standard format of torch.utils.data.Dataset.
     # ch_names: list of strings, channel names of the dataset. It should be in capital letters.
     # metrics: list of strings, the metrics you want to use. We utilize PyHealth to implement it.
-    dataset_train, dataset_test, dataset_val, ch_names, metrics = get_dataset(cfg.data)
+    dataset_train, dataset_val, dataset_test, ch_names, metrics = get_dataset(cfg.data, work_dir=output_dir)
     cfg.model.num_classes = cfg.data.num_classes
 
     # if args.disable_eval_during_finetuning:
@@ -355,16 +383,18 @@ def main(ds_init, cfg: str = None, debug: bool = False):
             if type(dataset_test) == list:
                 sampler_test = [torch.utils.data.DistributedSampler(
                     dataset, num_replicas=num_tasks, rank=global_rank, shuffle=False) for dataset in dataset_test]
-            else:
+            elif dataset_test is not None :
                 sampler_test = torch.utils.data.DistributedSampler(
                     dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+            else:
+                sampler_test = None
         else:
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-            sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+            sampler_test = torch.utils.data.SequentialSampler(dataset_test) if dataset_test is not None else None
     else:
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-        sampler_test = torch.utils.data.SequentialSampler(dataset_test)
+        sampler_test = torch.utils.data.SequentialSampler(dataset_test) if dataset_test is not None else None
 
     if global_rank == 0 and cfg.log.log_dir is not None:
         log_dir = Path(cfg.log.log_dir, 'tb_logs') if not debug else Path(cfg.log.log_dir, 'DBG', 'tb_logs')
@@ -374,7 +404,8 @@ def main(ds_init, cfg: str = None, debug: bool = False):
         log_writer = None
 
     data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
+        dataset_train,
+        sampler=sampler_train,
         batch_size=cfg.data.batch_size_train,
         num_workers=cfg.train.num_workers,
         pin_memory=cfg.train.pin_mem,
@@ -399,7 +430,7 @@ def main(ds_init, cfg: str = None, debug: bool = False):
                 pin_memory=cfg.train.pin_mem,
                 drop_last=False
             ) for dataset, sampler in zip(dataset_test, sampler_test)]
-        else:
+        elif dataset_test is not None:
             data_loader_test = torch.utils.data.DataLoader(
                 dataset_test, sampler=sampler_test,
                 batch_size=cfg.data.batch_size_inference,
@@ -407,6 +438,8 @@ def main(ds_init, cfg: str = None, debug: bool = False):
                 pin_memory=cfg.train.pin_mem,
                 drop_last=False
             )
+        else:
+            data_loader_test = None
     else:
         data_loader_val = None
         data_loader_test = None
@@ -562,7 +595,6 @@ def main(ds_init, cfg: str = None, debug: bool = False):
     print(f"Start training for {cfg.train.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
-    max_accuracy_test = 0.0
     is_binary = (cfg.model.num_classes == 1)
     if dist_utils.is_main_process():
         cfg_yaml_path = Path(output_dir, 'run_cfg.yaml')
@@ -612,41 +644,61 @@ def main(ds_init, cfg: str = None, debug: bool = False):
                                  save_ckpt_freq=cfg.log.save_ckpt_freq)
 
         if data_loader_val is not None:
-            val_metrics, valid_results_df, valid_conf_matrix = evaluate_classifier(data_loader_val, classifier_model,
-                                                                                   device, header='Val:',
+            val_metrics, valid_results_df, valid_conf_matrix = evaluate_classifier(data_loader_val,
+                                                                                   classifier_model,
+                                                                                   device,
+                                                                                   header='Val:',
                                                                                    ch_names=ch_names,
-                                                                                   metrics=metrics, is_binary=is_binary,
+                                                                                   metrics=metrics,
+                                                                                   is_binary=is_binary,
                                                                                    losses_weights=cfg.train.losses_weights)
             print(f"Accuracy of the network on the {len(dataset_val)} val EEG: {val_metrics['accuracy']:.2f}%")
-            test_metrics, test_results_df, test_conf_matrix = evaluate_classifier(data_loader_test, classifier_model,
-                                                                                  device, header='Test:',
+        if data_loader_test is not None:
+            test_metrics, test_results_df, test_conf_matrix = evaluate_classifier(data_loader_test,
+                                                                                  classifier_model,
+                                                                                  device,
+                                                                                  header='Test:',
                                                                                   ch_names=ch_names,
-                                                                                  metrics=metrics, is_binary=is_binary,
+                                                                                  metrics=metrics,
+                                                                                  is_binary=is_binary,
                                                                                   losses_weights=cfg.train.losses_weights)
             print(f"Accuracy of the network on the {len(dataset_test)} test EEG: {test_metrics['accuracy']:.2f}%")
+        else:
+            test_metrics = None
+            test_results_df = None
+            test_conf_matrix = None
 
-            if max_accuracy < val_metrics["accuracy"]:
-                max_accuracy = val_metrics["accuracy"]
-                if output_dir:
-                    models_io.save_model(output_dir=output_dir,
-                                         cfg=cfg,
-                                         model=classifier_model,
-                                         model_without_ddp=model_without_ddp,
-                                         optimizer=optimizer,
-                                         loss_scaler=loss_scaler,
-                                         epoch="best",
-                                         model_ema=model_encoder_ema)
-                max_accuracy_test = test_metrics["accuracy"]
 
-            print(f'Max accuracy val: {max_accuracy:.2f}%, max accuracy test: {max_accuracy_test:.2f}%')
+        if max_accuracy < val_metrics["accuracy"]:
+            max_accuracy = val_metrics["accuracy"]
+            if output_dir:
+                models_io.save_model(output_dir=output_dir,
+                                     cfg=cfg,
+                                     model=classifier_model,
+                                     model_without_ddp=model_without_ddp,
+                                     optimizer=optimizer,
+                                     loss_scaler=loss_scaler,
+                                     epoch="best",
+                                     model_ema=model_encoder_ema)
+
+
             if log_writer is not None:
                 update_tb_logger(log_writer, val_metrics, test_metrics, epoch)
 
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'val_{k}': v for k, v in val_metrics.items()},
-                         **{f'test_{k}': v for k, v in test_metrics.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
+            if test_conf_matrix is not None:
+                log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                             **{f'val_{k}': v for k, v in val_metrics.items()},
+                             **{f'test_{k}': v for k, v in test_metrics.items()},
+                             'epoch': epoch,
+                             'n_parameters': n_parameters}
+                print(f'Max accuracy val: {max_accuracy:.2f}%, max accuracy test: {test_metrics["accuracy"]:.2f}%')
+            else:
+                log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                             **{f'val_{k}': v for k, v in val_metrics.items()},
+                             'epoch': epoch,
+                             'n_parameters': n_parameters}
+                print(f'Max accuracy val: {max_accuracy:.2f}%')
+
         else:
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          'epoch': epoch,
@@ -658,9 +710,10 @@ def main(ds_init, cfg: str = None, debug: bool = False):
             with open(Path(output_dir, f"log_epoch_{epoch}.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-            save_eval_results(test_conf_matrix, test_results_df, test_metrics,
-                              output_dir,
-                              mode='test', epoch=epoch)
+            if test_conf_matrix is not None:
+                save_eval_results(test_conf_matrix, test_results_df, test_metrics,
+                                  output_dir,
+                                  mode='test', epoch=epoch)
             save_eval_results(valid_conf_matrix, valid_results_df, val_metrics,
                               output_dir,
                               mode='valid', epoch=epoch)
@@ -688,7 +741,7 @@ def save_eval_results(conf_matrix: np.ndarray,
         pass  # Silently ignore any exception
 
 
-def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats, epoch: int):
+def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats=None, epoch: int =0):
     for key, value in val_stats.items():
         if key == 'accuracy':
             log_writer.update(accuracy=value, head="val", step=epoch)
@@ -706,26 +759,29 @@ def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats, epoch
             log_writer.update(loss=value, head="val", step=epoch)
         else:
             log_writer.update(**{key: value}, head="val", step=epoch)
-    for key, value in test_stats.items():
-        if key == 'accuracy':
-            log_writer.update(accuracy=value, head="test", step=epoch)
-        elif key == 'balanced_accuracy':
-            log_writer.update(balanced_accuracy=value, head="test", step=epoch)
-        elif key == 'f1_weighted':
-            log_writer.update(f1_weighted=value, head="test", step=epoch)
-        elif key == 'pr_auc':
-            log_writer.update(pr_auc=value, head="test", step=epoch)
-        elif key == 'roc_auc':
-            log_writer.update(roc_auc=value, head="test", step=epoch)
-        elif key == 'cohen_kappa':
-            log_writer.update(cohen_kappa=value, head="test", step=epoch)
-        elif key == 'loss':
-            log_writer.update(loss=value, head="test", step=epoch)
-        else:
-            log_writer.update(**{key: value}, head="test", step=epoch)
+    if test_stats is not None:
+        for key, value in test_stats.items():
+            if key == 'accuracy':
+                log_writer.update(accuracy=value, head="test", step=epoch)
+            elif key == 'balanced_accuracy':
+                log_writer.update(balanced_accuracy=value, head="test", step=epoch)
+            elif key == 'f1_weighted':
+                log_writer.update(f1_weighted=value, head="test", step=epoch)
+            elif key == 'pr_auc':
+                log_writer.update(pr_auc=value, head="test", step=epoch)
+            elif key == 'roc_auc':
+                log_writer.update(roc_auc=value, head="test", step=epoch)
+            elif key == 'cohen_kappa':
+                log_writer.update(cohen_kappa=value, head="test", step=epoch)
+            elif key == 'loss':
+                log_writer.update(loss=value, head="test", step=epoch)
+            else:
+                log_writer.update(**{key: value}, head="test", step=epoch)
 
 
-def build_classifier_model(cfg: ConfigRunClassifierModel, device: torch.device) -> NeurolCodebookClassifier:
+def build_classifier_model(cfg: ConfigRunClassifierModel,
+                           device: torch.device,
+                           labram_asis: bool = False) -> NeurolCodebookClassifier:
     encoder_model = get_encoder_models(cfg.model)
     vqnsp_model = get_visual_tokenizer(cfg.model)
     ckpt_encoder_path = cfg.model.weights_encoder_path
@@ -743,6 +799,8 @@ def build_classifier_model(cfg: ConfigRunClassifierModel, device: torch.device) 
     classifier_model = NeurolCodebookClassifier(encoder=encoder_model,
                                                 vqnsp=vqnsp_model,
                                                 cfg=cfg.model)
+
+
     # num_classes=args.nb_classes,
     # classifier_type=args.classifier_type,
     # features_emb_dim=args.features_classif_dim,
@@ -834,10 +892,10 @@ def get_visual_tokenizer(cfg: ConfigEEGClassifier) -> VQNSP:
     return model
 
 
-def get_dataset(cfg: ConfigProcEEGDataset):
+def get_dataset(cfg: ConfigProcEEGDataset, work_dir: str):
     if cfg.ds_name == 'TUAB':
-        dataset_dir = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(dataset_dir)
+        cfg.dataset_path = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
+        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(cfg.dataset_path)
         ch_names = ['EEG FP1', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'EEG C3-REF', 'EEG C4-REF', 'EEG P3-REF',
                     'EEG P4-REF', 'EEG O1-REF', 'EEG O2-REF', 'EEG F7-REF', \
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF',
@@ -863,11 +921,12 @@ def get_dataset(cfg: ConfigProcEEGDataset):
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif cfg.ds_name == 'INTERNAL':
         cfg.num_classes = 1  # 3
-        is_normal_abnormal = False
-        dataset_dir = Path("/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec")
-        metadata_path = Path("/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv")
+        cfg.is_normal_abnormal = False
+        cfg.dataset_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
+        cfg.metadata_csv_path = "/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv"
+        cfg.is_binary_label = True
         # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
-        label_names = ['is_control', 'is_lesion']
+        cfg.label_names = ['is_control', 'is_lesion']
         ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
                     'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
         # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
@@ -884,22 +943,24 @@ def get_dataset(cfg: ConfigProcEEGDataset):
                    "f1",
                    "recall",
                    "precision"]  # binary classification
-        train_dataset, test_dataset, val_dataset = patch_datasets.prepare_internal_dataset(root_path=dataset_dir,
-                                                                                           seed=cfg.seed,
-                                                                                           is_normal_abnormal=is_normal_abnormal,
-                                                                                           class_labels=label_names,
-                                                                                           metadata_csv_path=metadata_path)
+        train_dataset, val_dataset, test_dataset  = patch_datasets.prepare_internal_dataset(cfg=cfg, work_dir=work_dir)
     else:
         raise ValueError("Unknown dataset: %s" % cfg.ds_name)
 
-    return train_dataset, test_dataset, val_dataset, ch_names, metrics
+    return train_dataset, val_dataset, test_dataset,  ch_names, metrics
 
 
 if __name__ == '__main__':
-    opts, ds_init = get_args()
-    dist_utils.init_distributed_mode(opts)
+    args, ds_init = get_args()
+    dist_utils.init_distributed_mode(args)
     if ds_init is not None:
-        dist_utils.create_ds_config(opts)
+        dist_utils.create_ds_config(args)
     # if opts.output_dir:
     #     Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
-    main(ds_init, cfg=opts.run_config, debug=opts.debug)
+    if args.cross_valid:
+        pass
+    else:
+        run_classifier_training(ds_init,
+                            cfg=args.run_config,
+                            debug=args.debug,
+                            labram_asis=args.labram_asis)
