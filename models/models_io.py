@@ -2,7 +2,7 @@ import glob
 import io
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -96,7 +96,7 @@ def load_state_dict(model: nn.Module,
 
 def save_model(output_dir: str,
                cfg: ConfigRunClassifierModel,
-               epoch: int,
+               epoch: Union[str,int],
                model: nn.Module,
                model_without_ddp: nn.Module,
                optimizer: torch.optim.Optimizer,

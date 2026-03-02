@@ -10,3 +10,4 @@ from .config_model import ConfigNeuralTransformer, \
     DEFAULT_CODEBOOK_EMBED_DIM, \
     DEFAULT_CODEBOOK_DECAY
 from .connfig_run import ConfigRunClassifierModel
+from .serialization import to_data_file, from_data_file

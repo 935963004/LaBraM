@@ -9,32 +9,30 @@
 # ---------------------------------------------------------
 
 import argparse
-from argparse import Namespace
+import copy
 import datetime
 import json
 import os
 import time
 from collections import OrderedDict
-from pathlib import Path
-from typing import Any, OrderedDict, Dict
+from typing import Any, OrderedDict, Dict, Union
 
 # from deepspeed import DeepSpeedConfig
 import numpy as np
 import pandas as pd
-import torch
 import torch.backends.cudnn as cudnn
 from timm.loss import LabelSmoothingCrossEntropy
 from timm.models import create_model
 from timm.utils import ModelEma
 
-from configs import FeaturesType, ConfigVQNSP, ConfigRunClassifierModel, ClassifierTypes, ConfigProcEEGDataset, \
-    ConfigEEGClassifier
+from configs import FeaturesType, ConfigRunClassifierModel, ClassifierTypes, ConfigProcEEGDataset, \
+    ConfigEEGClassifier, to_data_file
 from configs.config_optimizer import OptimizerTypes
 from data import patch_datasets
 from models import models_io
 from models.classifier_model import NeurolCodebookClassifier
-from models.neural_transformer import NeuralTransformer
-from models.vqnsp_model import VQNSP
+from models.registry_finetune_classifiers import *
+from models.registry_vqnsp_models import *
 from train import optimizers, logers
 from train.logers import TensorboardLogger
 from train.losses import SpectralPatchedLoss
@@ -42,8 +40,7 @@ from train.optimizers import create_optimizer, get_parameter_groups, LayerDecayV
     NativeScalerWithGradNormCount as NativeScaler
 from train.train_finetuning_classifier import train_one_epoch, evaluate_classifier
 from utils import dist_utils
-from models.registry_finetune_classifiers import *
-from models.registry_vqnsp_models import *
+
 
 def get_default_cfg(labram_asis: bool = False) -> ConfigRunClassifierModel:
     cfg = ConfigRunClassifierModel()
@@ -64,18 +61,16 @@ def get_default_cfg(labram_asis: bool = False) -> ConfigRunClassifierModel:
     cfg.train.losses_weights.classifier = 5.0
     if labram_asis:
         cfg.log.experiment = "labram_asis"
-        cfg.train.losses_weights.classifier=1.0
+        cfg.train.losses_weights.classifier = 1.0
         cfg.train.losses_weights.magnitude_recon = 0.0
-        cfg.train.losses_weights.phase_recon =0.0
-        cfg.train.losses_weights.quantize_err =0.0
-
-
+        cfg.train.losses_weights.phase_recon = 0.0
+        cfg.train.losses_weights.quantize_err = 0.0
 
     cfg.data.batch_size_train = 128
     cfg.data.batch_size_val = 128
     cfg.data.ds_name = "INTERNAL"
     cfg.data.data_split = [0.8, 0.2, 0.0]
-    cfg.data.fold_split_path = None #"./checkpoints/finetune_dim64_2lastlayers_CLS_Bags_PATCH_INTERNAL_20260226-191127/fold_split_ids.yaml"
+    cfg.data.fold_split_path = None  # "./checkpoints/finetune_dim64_2lastlayers_CLS_Bags_PATCH_INTERNAL_20260226-191127/fold_split_ids.yaml"
 
     cfg.model.name_encoder = 'labram_base_patch200_200'
     cfg.model.name_vqnsp = 'vqnsp_encoder_base_decoder_3x200x12'
@@ -125,12 +120,12 @@ def get_default_cfg(labram_asis: bool = False) -> ConfigRunClassifierModel:
     cfg.optim.disable_weight_decay_on_rel_pos_bias = True
 
     decoder_layers = ["quantizer", "decoder",
-                  "encode_task_layer", "decode_task_layer"]
+                      "encode_task_layer", "decode_task_layer"]
     train_last_layers = 2
-    blocks_filter = [f"encoder.blocks.{i}." for i in range(cfg.model.encoder.depth - train_last_layers -1)]
+    blocks_filter = [f"encoder.blocks.{i}." for i in range(cfg.model.encoder.depth - train_last_layers - 1)]
     filter_opt = ["cls_token", "patch_embed", "pos_embed", "time_embed"] + decoder_layers + \
                  blocks_filter
-    cfg.optim.filter_layers=filter_opt
+    cfg.optim.filter_layers = filter_opt
     if labram_asis:
         cfg.optim.filter_layers = decoder_layers
         cfg.optim.clip_grad = None
@@ -321,7 +316,9 @@ def get_args():
     return parser.parse_args(), ds_init
 
 
-def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labram_asis: bool = False):
+def run_classifier_training(ds_init,
+                            cfg: Union[str, ConfigRunClassifierModel] = None,
+                            debug: bool = False, labram_asis: bool = False) -> Dict[str, Any]:
     # args: argparse.Namespace
     # dist_utils.init_distributed_mode(args)
 
@@ -330,12 +327,7 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
     #
     # print(args)
 
-    if cfg is None or cfg == '':
-        cfg = get_default_cfg(labram_asis=labram_asis)
-    elif isinstance(cfg, str):
-        if not os.path.isfile(cfg):
-            raise ValueError(f"Config file {cfg} does not exist!")
-        cfg = ConfigRunClassifierModel.load_config(cfg)
+    cfg = get_run_cfg(cfg, labram_asis, debug)
     if cfg.train.enable_deepspeed:
         raise NotImplementedError("DeepSpeed is not supported yet.")
         # dist_utils.init_distributed_mode(args)
@@ -347,12 +339,15 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
-    time_stamp = f"{time.strftime('%Y%m%d-%H%M%S')}"
-    run_name = f"{cfg.log.experiment}_{cfg.data.ds_name}_{time_stamp}"
+    if cfg.log.run_name is None:
+        cfg.log.run_name = _get_run_name(cfg)
+
     if cfg.log.ckpt_dir:
         output_dir = cfg.log.ckpt_dir if not debug else os.path.join(cfg.log.ckpt_dir, 'DBG')
-        output_dir = Path(output_dir, run_name)
+        output_dir = Path(output_dir, cfg.log.run_name)
         output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = None
 
     cudnn.benchmark = True
 
@@ -383,7 +378,7 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
             if type(dataset_test) == list:
                 sampler_test = [torch.utils.data.DistributedSampler(
                     dataset, num_replicas=num_tasks, rank=global_rank, shuffle=False) for dataset in dataset_test]
-            elif dataset_test is not None :
+            elif dataset_test is not None:
                 sampler_test = torch.utils.data.DistributedSampler(
                     dataset_test, num_replicas=num_tasks, rank=global_rank, shuffle=False)
             else:
@@ -399,7 +394,7 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
     if global_rank == 0 and cfg.log.log_dir is not None:
         log_dir = Path(cfg.log.log_dir, 'tb_logs') if not debug else Path(cfg.log.log_dir, 'DBG', 'tb_logs')
         log_dir.mkdir(exist_ok=True, parents=True)
-        log_writer = logers.TensorboardLogger(log_dir=log_dir, experiment=run_name)
+        log_writer = logers.TensorboardLogger(log_dir=log_dir, experiment=cfg.log.run_name)
     else:
         log_writer = None
 
@@ -596,13 +591,21 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
     start_time = time.time()
     max_accuracy = 0.0
     is_binary = (cfg.model.num_classes == 1)
+    best_epoch = -1
+    out_run_files = {}
     if dist_utils.is_main_process():
         cfg_yaml_path = Path(output_dir, 'run_cfg.yaml')
         print(f"Save cfg to {cfg_yaml_path}")
         cfg.save_to(cfg_yaml_path)
         ConfigRunClassifierModel.load_config(str(cfg_yaml_path))
-
+    out_eval_last_test_files = None
+    out_eval_last_valid_files = None
+    out_eval_best_test_files = None
+    out_eval_best_valid_files = None
+    log_best_epoch_metrics_file = None
+    epoch = -1
     for epoch in range(cfg.train.start_epoch, cfg.train.epochs):
+
         if cfg.train.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
@@ -668,8 +671,8 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
             test_results_df = None
             test_conf_matrix = None
 
-
         if max_accuracy < val_metrics["accuracy"]:
+            best_epoch = epoch
             max_accuracy = val_metrics["accuracy"]
             if output_dir:
                 models_io.save_model(output_dir=output_dir,
@@ -680,7 +683,6 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
                                      loss_scaler=loss_scaler,
                                      epoch="best",
                                      model_ema=model_encoder_ema)
-
 
             if log_writer is not None:
                 update_tb_logger(log_writer, val_metrics, test_metrics, epoch)
@@ -707,20 +709,62 @@ def run_classifier_training(ds_init, cfg: str = None, debug: bool = False, labra
         if output_dir and dist_utils.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(Path(output_dir, f"log_epoch_{epoch}.txt"), mode="a", encoding="utf-8") as f:
+            log_best_epoch_metrics_file = str(Path(output_dir, f"log_epoch_{epoch}.txt"))
+            with open(log_best_epoch_metrics_file, mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
             if test_conf_matrix is not None:
-                save_eval_results(test_conf_matrix, test_results_df, test_metrics,
-                                  output_dir,
-                                  mode='test', epoch=epoch)
-            save_eval_results(valid_conf_matrix, valid_results_df, val_metrics,
-                              output_dir,
-                              mode='valid', epoch=epoch)
+                out_eval_last_test_files = save_eval_results(test_conf_matrix, test_results_df, test_metrics,
+                                                             output_dir,
+                                                             mode='test',
+                                                             epoch=epoch)
+                if epoch == best_epoch:
+                    out_eval_best_test_files = out_eval_last_test_files
+            else:
+                out_eval_last_test_files = None
+            out_eval_last_valid_files = save_eval_results(valid_conf_matrix, valid_results_df, val_metrics,
+                                                          output_dir,
+                                                          mode='valid', epoch=epoch)
+            if epoch == best_epoch:
+                out_eval_best_valid_files = out_eval_last_valid_files
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
+    if output_dir and dist_utils.is_main_process():
+        out_run_files = {'last_epoch': epoch,
+                         'best_epoch': best_epoch,
+                         'last_test_outs': out_eval_last_test_files,
+                         'best_test_outs': out_eval_best_test_files,
+                         'last_valid_outs': out_eval_last_valid_files,
+                         'best_valid_outs': out_eval_best_valid_files,
+                         'best_eval_metrics': log_best_epoch_metrics_file}
+
+    return out_run_files
+
+
+def get_run_cfg(cfg: Union[str, ConfigRunClassifierModel, None],
+                labram_asis: bool,
+                debug: bool = False) -> ConfigRunClassifierModel:
+    if cfg is None:
+        cfg = get_default_cfg(labram_asis=labram_asis)
+    elif isinstance(cfg, str):
+        if not os.path.isfile(cfg):
+            raise ValueError(f"Config file {cfg} does not exist!")
+        cfg = ConfigRunClassifierModel.load_config(cfg)
+
+    if debug:
+        cfg.train.epochs = 5
+        cfg.optim.warmup_epochs = 2
+    return cfg
+
+
+def _get_run_name(cfg: ConfigRunClassifierModel, prefix: str = None) -> str:
+    time_stamp = f"{time.strftime('%Y%m%d-%H%M%S')}"
+    run_name = f"{cfg.log.experiment}_{cfg.data.ds_name}_{time_stamp}"
+    if prefix is not None:
+        run_name = f"{prefix}_{run_name}"
+    return run_name
 
 
 def save_eval_results(conf_matrix: np.ndarray,
@@ -728,20 +772,28 @@ def save_eval_results(conf_matrix: np.ndarray,
                       stats_metrics: Dict[str, float],
                       output_dir: Path,
                       mode: str = 'test',
-                      epoch: int = 0):
+                      epoch: int = 0) -> Dict[str, str]:
     results_file = Path(output_dir, f'{mode}_results_epoch_{epoch}.csv')
     results_df.to_csv(results_file, index=False)
     conf_matrix_file = Path(output_dir, f'{mode}_conf_matrix_epoch_{epoch}.csv')
     pd.DataFrame(conf_matrix).to_csv(conf_matrix_file, index=False)
     stats_file = Path(output_dir, f'{mode}_stats_epoch_{epoch}.json')
+    out_files = {
+        'epoch': epoch,
+        'mode': mode,
+        'conf_matrix': conf_matrix_file,
+        'pred_results': results_file,
+        'stats': stats_file}
     try:
         with open(stats_file, 'w') as json_file:
             json.dump(stats_metrics, json_file, indent=4)
     except Exception:
-        pass  # Silently ignore any exception
+        raise RuntimeError(f"Can't save stats file {stats_file}")
+
+    return out_files
 
 
-def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats=None, epoch: int =0):
+def update_tb_logger(log_writer: TensorboardLogger, val_stats, test_stats=None, epoch: int = 0):
     for key, value in val_stats.items():
         if key == 'accuracy':
             log_writer.update(accuracy=value, head="val", step=epoch)
@@ -799,7 +851,6 @@ def build_classifier_model(cfg: ConfigRunClassifierModel,
     classifier_model = NeurolCodebookClassifier(encoder=encoder_model,
                                                 vqnsp=vqnsp_model,
                                                 cfg=cfg.model)
-
 
     # num_classes=args.nb_classes,
     # classifier_type=args.classifier_type,
@@ -892,7 +943,7 @@ def get_visual_tokenizer(cfg: ConfigEEGClassifier) -> VQNSP:
     return model
 
 
-def get_dataset(cfg: ConfigProcEEGDataset, work_dir: str):
+def get_dataset(cfg: ConfigProcEEGDataset, work_dir: str = None):
     if cfg.ds_name == 'TUAB':
         cfg.dataset_path = Path("/home/leong/data/EEG/TAUB/TUH_Abnormal/v3.0.1/edf/processed/")
         train_dataset, test_dataset, val_dataset = patch_datasets.prepare_TUAB_dataset(cfg.dataset_path)
@@ -920,13 +971,7 @@ def get_dataset(cfg: ConfigProcEEGDataset, work_dir: str):
         train_dataset, test_dataset, val_dataset = patch_datasets.prepare_HMC_dataset(dataset_dir)
         ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     elif cfg.ds_name == 'INTERNAL':
-        cfg.num_classes = 1  # 3
-        cfg.is_normal_abnormal = False
-        cfg.dataset_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
-        cfg.metadata_csv_path = "/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv"
-        cfg.is_binary_label = True
-        # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
-        cfg.label_names = ['is_control', 'is_lesion']
+        _update_cfg_internal_ds(cfg)
         ch_names = ['FP1', 'FP2', 'F3', 'F4', 'C3', 'C4', 'P3', 'P4', 'O1', 'O2', 'F7',
                     'F8', 'T3', 'T4', 'T5', 'T6', 'A1', 'A2', 'FZ', 'CZ', 'PZ', 'T1', 'T2']
         # metrics = ["accuracy", "balanced_accuracy", "cohen_kappa", "f1_weighted"]
@@ -943,11 +988,178 @@ def get_dataset(cfg: ConfigProcEEGDataset, work_dir: str):
                    "f1",
                    "recall",
                    "precision"]  # binary classification
-        train_dataset, val_dataset, test_dataset  = patch_datasets.prepare_internal_dataset(cfg=cfg, work_dir=work_dir)
+        train_dataset, val_dataset, test_dataset = patch_datasets.prepare_internal_dataset(cfg=cfg, work_dir=work_dir)
     else:
         raise ValueError("Unknown dataset: %s" % cfg.ds_name)
 
-    return train_dataset, val_dataset, test_dataset,  ch_names, metrics
+    return train_dataset, val_dataset, test_dataset, ch_names, metrics
+
+
+def _report_cv_summary(all_fold_results, base_output_dir, n_folds):
+    """Print and save cross-validation aggregate metrics."""
+    print(f"\n{'=' * 60}")
+    print(f"  CROSS-VALIDATION SUMMARY ({n_folds} folds)")
+    print(f"{'=' * 60}")
+
+    summary_df = pd.DataFrame(all_fold_results)
+    print(summary_df.to_string(index=False))
+
+    numeric_cols = summary_df.select_dtypes(include=[np.number]).columns.drop('fold', errors='ignore')
+    print("\nAggregated (mean ± std):")
+    summary_stats = {}
+    for col in numeric_cols:
+        mean_val = summary_df[col].mean()
+        std_val = summary_df[col].std()
+        print(f"  {col}: {mean_val:.4f} ± {std_val:.4f}")
+        summary_stats[col] = {'mean': float(mean_val), 'std': float(std_val)}
+
+    summary_df.to_csv(Path(base_output_dir, 'cv_summary.csv'), index=False)
+    with open(Path(base_output_dir, 'cv_summary_stats.json'), 'w') as f:
+        json.dump(summary_stats, f, indent=4)
+    print(f"\nSaved summary to {base_output_dir}/cv_summary.csv")
+
+
+def _update_cfg_internal_ds(cfg: ConfigProcEEGDataset):
+    cfg.num_classes = 1  # 3
+    cfg.is_normal_abnormal = False
+    cfg.dataset_path = "/home/leong/data/EEG/INTER_DATA/lesion_control_processed_10sec"
+    cfg.metadata_csv_path = "/home/leong/data/EEG/INTER_DATA/all_labels_int20K_eeg.csv"
+    cfg.is_binary_label = True
+    # label_names = ['is_normal', 'is_epileptiform', 'is_gen_slowing']
+    cfg.label_names = ['is_control', 'is_lesion']
+
+
+def run_cross_validation(cfg: Union[ConfigRunClassifierModel, str, None],
+                         debug: bool = False,
+                         labram_asis: bool = False,
+                         ds_init=None):
+    """
+    Orchestrates K-fold cross-validation by:
+      1. Creating a shared base output directory with a CV run_name
+      2. Generating stratified fold splits and saving per-fold split YAMLs
+      3. Saving per-fold run_cfg YAMLs (each self-contained for parallel jobs)
+      4. Calling run_classifier_training sequentially for each fold
+
+    For parallel execution: run step 1-3 once (prepare_cross_validation_configs),
+    then launch each fold independently with:
+        python run_class_finetuning_trainer.py --run_config <base_dir>/fold_<i>/run_cfg.yaml
+    """
+    cfg = get_run_cfg(cfg, labram_asis, debug)
+
+    if cfg.data.ds_name == 'INTERNAL':
+        _update_cfg_internal_ds(cfg.data)
+    else:
+        raise ValueError("Cross-validation currently only implemented for INTERNAL dataset")
+
+    n_folds = cfg.data.cross_valid_folds
+    assert n_folds >= 2, f"cross_valid_folds must be >= 2, got {n_folds}"
+
+    # --- 1. Base run_name and output directory ---
+    base_run_name = _get_run_name(cfg, prefix="CV")
+    base_output_dir = Path(
+        cfg.log.ckpt_dir if not debug else os.path.join(cfg.log.ckpt_dir, 'DBG'),
+        base_run_name
+    )
+    base_output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Cross-validation base directory: {base_output_dir}")
+
+    # --- 2. Build the full dataset to generate fold splits ---
+    cfg.data.metadata_csv_path = (
+        os.path.join(cfg.data.dataset_path, "metadata.csv")
+        if cfg.data.metadata_csv_path is None else cfg.data.metadata_csv_path
+    )
+    eeg_dataset = patch_datasets.InternalDataset(cfg.data)
+    fold_splits = patch_datasets.cross_validation_split_data_ids(eeg_dataset, cfg.data)
+    del eeg_dataset
+
+    # Save all splits together for reference
+    all_splits_path = os.path.join(base_output_dir, 'cv_all_fold_splits.json')
+    to_data_file(fold_splits, all_splits_path)
+    print(f"Saved all {n_folds} fold splits to {all_splits_path}")
+
+    # --- 3. Prepare per-fold configs and split files ---
+    fold_cfgs = []
+    for fold_idx, fold_split in enumerate(fold_splits):
+        fold_dir = Path(base_output_dir, f"fold_{fold_idx}")
+        fold_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save this fold's train/valid split as a standalone file
+        # Format matches what prepare_internal_dataset / split_data_ids produces:
+        #   {'train': [...], 'valid': [...], 'test': None}
+        fold_split_data = {
+            'train': fold_split['train'],
+            'valid': fold_split['valid'],
+            'test': None
+        }
+        fold_split_path = os.path.join(fold_dir, f'fold_{fold_idx}_split_ids.yaml')
+        to_data_file(fold_split_data, fold_split_path)
+
+        # Deep-copy config and customize for this fold
+        fold_cfg = copy.deepcopy(cfg)
+        fold_cfg.log.run_name = f"fold_{fold_idx}_{base_run_name}"
+        fold_cfg.data.fold_split_path = fold_split_path
+        fold_cfg.data.data_split = [0.0, 0.0, 0.0]  # splits are explicit, not computed
+        fold_cfg.log.ckpt_dir = str(base_output_dir)  # fold subdir created by run_classifier_training
+
+        # Save per-fold config so each fold can be launched independently
+        fold_cfg_path = os.path.join(fold_dir, 'run_cfg.yaml')
+        fold_cfg.save_to(fold_cfg_path)
+        fold_cfgs.append(fold_cfg)
+
+        print(f"  Fold {fold_idx}: split -> {fold_split_path}")
+        print(f"  Fold {fold_idx}: config -> {fold_cfg_path}")
+        print(f"  Fold {fold_idx}: train={len(fold_split['train'])}, "
+              f"valid={len(fold_split['valid'])}")
+
+    # Save master config
+    cfg.save_to(os.path.join(base_output_dir, 'run_cfg.yaml'))
+
+    print(f"\n{'=' * 60}")
+    print(f"  All {n_folds} fold configs ready in: {base_output_dir}")
+    print(f"  To run folds in parallel, launch each independently:")
+    for fold_idx in range(n_folds):
+        fold_cfg_path = base_output_dir / f"fold_{fold_idx}" / "run_cfg.yaml"
+        print(f"    python run_class_finetuning_trainer.py --run_config {fold_cfg_path}")
+    print(f"{'=' * 60}\n")
+
+    # --- 4. Sequential execution of all folds ---
+    all_fold_results = []
+    all_folds_predictions = []
+    for fold_idx, fold_cfg in enumerate(fold_cfgs):
+        print(f"\n{'=' * 60}")
+        print(f"  FOLD {fold_idx} / {n_folds}  — {fold_cfg.log.run_name}")
+        print(f"{'=' * 60}\n")
+
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        fold_out_run_files = run_classifier_training(
+            ds_init=ds_init,
+            cfg=fold_cfg,  # pass pre-built config object (not a path)
+            debug=debug,
+            labram_asis=labram_asis,
+        )
+        all_folds_predictions.append(fold_out_run_files['last_valid_outs']['pred_results'])
+
+        # Collect best validation results if available f'{mode}_results_epoch_{epoch}.csv
+        fold_dir = base_output_dir / f"fold_{fold_idx}"
+        best_stats_path = fold_dir / fold_cfg.log.run_name / 'valid_stats_epoch_best.json'
+        if best_stats_path.is_file():
+            with open(best_stats_path, 'r') as f:
+                fold_result = json.load(f)
+                fold_result['fold'] = fold_idx
+                all_fold_results.append(fold_result)
+
+    # --- 5. Aggregate & report (if sequential run completed all folds) ---
+    pred_results = pd.concat([pd.read_csv(pred_fold_file) for pred_fold_file in all_folds_predictions], axis=0)
+    pred_res_file = os.path.join(base_output_dir, 'pred_results.csv')
+    print(f"Saving aggregated predictions to {pred_res_file}")
+    pred_results.to_csv(pred_res_file, index=False)
+    if all_fold_results:
+        _report_cv_summary(all_fold_results, base_output_dir, n_folds)
+    return pred_results
+
+    if all_fold_results:
+        _report_cv_summary(all_fold_results, base_output_dir, n_folds)
 
 
 if __name__ == '__main__':
@@ -958,9 +1170,36 @@ if __name__ == '__main__':
     # if opts.output_dir:
     #     Path(opts.output_dir).mkdir(parents=True, exist_ok=True)
     if args.cross_valid:
-        pass
+        run_cross_validation(cfg=args.run_config, debug=args.debug, labram_asis=args.labram_asis, ds_init=ds_init)
     else:
-        run_classifier_training(ds_init,
-                            cfg=args.run_config,
-                            debug=args.debug,
-                            labram_asis=args.labram_asis)
+        outputs = run_classifier_training(ds_init,
+                                          cfg=args.run_config,
+                                          debug=args.debug,
+                                          labram_asis=args.labram_asis)
+
+        print(f'Best epoch: {outputs["best_epoch"]}')
+        print(f'Best val_loss: {outputs["best_val_loss"]}')
+        print("Outputs Files: ")
+        for mode_name in ['last_test_outs', 'best_test_outs', 'last_valid_outs', 'best_valid_outs']:
+            out_files = outputs[mode_name]
+            print(f"mode_name: {mode_name}")
+            print(f'Epoch: {out_files["epoch"]}')
+            print(f'Mode: {out_files["mode"]}')
+            print(f'Confusion Matrix: {out_files["conf_matrix"]}')
+            print(f'Prediction Results: {out_files["pred_results"]}')
+            print(f'Stats: {out_files["stats"]}')
+
+        # out_run_files = {'last_epoch': epoch,
+        #                  'best_epoch': best_epoch,
+        #                   'last_test_outs':
+        #                          'best_test_outs':
+        #                          'last_valid_outs':
+        #                          'best_valid_outs':
+        #                  'best_eval_metrics': log_best_epoch_metrics_file}
+        # out_eval_last_test_files:
+        # out_files = {
+        #     'epoch': epoch,
+        #     'mode': mode,
+        #     'conf_matrix': conf_matrix_file,
+        #     'pred_results': results_file,
+        #     'stats': stats_file}

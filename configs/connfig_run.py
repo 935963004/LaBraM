@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-
+from typing import Optional
 from configs.config_base import ParamsBase
 from configs.config_data import ConfigProcEEGDataset
 from configs.config_model import ConfigEEGClassifier
@@ -12,6 +12,7 @@ class LoggerParams(ParamsBase):
     experiment: str = 'class_finetune'
     log_dir: str = './logs'
     ckpt_dir: str = './checkpoints'
+    run_name: Optional[str] = None
     update_freq: int = 1
     save_ckpt_freq: int = 5
 

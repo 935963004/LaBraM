@@ -2,22 +2,21 @@ import os
 import pickle
 from _warnings import warn
 from pathlib import Path
-from typing import List, Union, Optional, Tuple, Dict, Any
+from typing import List, Union, Tuple, Dict
 
 import numpy as np
 import pandas as pd
-
 import torch
-from torch.utils.data import Dataset
 from einops import rearrange
 from scipy.signal import resample
 from sklearn.model_selection import train_test_split, StratifiedKFold
+from torch.utils.data import Dataset
 
-from configs import ConfigProcEEGDataset
 from configs.config_data import ConfigProcEEGDataset
-from data.hdf5_datasets import ShockDataset
-from data.eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE, DEFAULT_SEGMENT_LENGTH_SECS
 from configs.serialization import to_data_file, from_data_file
+from data.eeg_consts import MIN_DATA_LENGTH, DEFAULT_SAMPLING_RATE, DEFAULT_SEGMENT_LENGTH_SECS
+from data.hdf5_datasets import ShockDataset
+
 
 class HMCLoader(Dataset):
     def __init__(self, root, files, sampling_rate=200, eeg_max_len=-1, text_max_len=-1, is_instruct=False,
@@ -157,7 +156,8 @@ class InternalDataset(Dataset):
         class_labels = cfg.label_names
         self.metadata_df: pd.DataFrame = pd.read_csv(cfg.metadata_csv_path)
         if not set(class_labels).issubset(self.metadata_df.columns):
-            raise ValueError(f"Metadata CSV is missing required columns: {set(class_labels) - set(self.metadata_df.columns)}")
+            raise ValueError(
+                f"Metadata CSV is missing required columns: {set(class_labels) - set(self.metadata_df.columns)}")
         self.metadata_df['class_label'] = np.argmax(self.metadata_df[class_labels], 1)
         if self.is_normal_abnormal:
             self.metadata_df['class_label'] = self.metadata_df['class_label'] == 0
@@ -180,7 +180,6 @@ class InternalDataset(Dataset):
         if self.metadata_df.shape[0] < MIN_DATA_LENGTH:
             raise ValueError(f"Metadata CSV contains less than {MIN_DATA_LENGTH} rows.")
 
-
         self.default_rate = DEFAULT_SAMPLING_RATE
 
         self.len_sampling = len_in_sec * DEFAULT_SAMPLING_RATE
@@ -193,7 +192,7 @@ class InternalDataset(Dataset):
 
     # List of unique identifiers of EEG samples
     @property
-    def id_keys(self)->List[str]:
+    def id_keys(self) -> List[str]:
         return self.metadata_df.index.tolist()
 
     def get_subset(self, id_keys: List[str]) -> torch.utils.data.Subset:
@@ -251,11 +250,11 @@ class InternalDataset(Dataset):
             warn(f"EEG file {file_eeg_path} is longer than {len_sec} seconds.")
             data_eeg = data_eeg[:, start_idx:start_idx + self.len_sampling]
         data_eeg = torch.FloatTensor(data_eeg)
-        label  = row_ind['class_label'].astype(np.int_)
+        label = row_ind['class_label'].astype(np.int_)
         item_data = {'data': data_eeg,
                      'label': label,
                      'id_key': id_key,
-                     'id_interval': id_interval,}
+                     'id_interval': id_interval, }
         return item_data
 
 
@@ -294,6 +293,7 @@ class TUEVLoader(Dataset):
         sampling_rate (int): The user-specified sampling rate for the
             dataset. Defaults to 200 if not provided.
     """
+
     def __init__(self, root: str, files: List[str], sampling_rate=200):
         self.root = root
         self.files = files
@@ -313,7 +313,8 @@ class TUEVLoader(Dataset):
         return X, Y
 
 
-def prepare_HMC_dataset(root: Path, is_instruct: bool = False, eeg_max_len: int = -1, text_max_len: int = -1)->Tuple[Dataset, Dataset, Dataset]:
+def prepare_HMC_dataset(root: Path, is_instruct: bool = False, eeg_max_len: int = -1, text_max_len: int = -1) -> Tuple[
+    Dataset, Dataset, Dataset]:
     train_files = os.listdir(os.path.join(root, "../train"))
     val_files = os.listdir(os.path.join(root, "eval"))
     test_files = os.listdir(os.path.join(root, "test"))
@@ -321,14 +322,17 @@ def prepare_HMC_dataset(root: Path, is_instruct: bool = False, eeg_max_len: int 
     print(len(train_files), len(val_files), len(test_files))
 
     # prepare training and test data loader
-    train_dataset = HMCLoader(os.path.join(root, "../train"), train_files, is_instruct=is_instruct, eeg_max_len=eeg_max_len, text_max_len=text_max_len)
-    test_dataset = HMCLoader(os.path.join(root, "test"), test_files, is_instruct=is_instruct, is_val=True, eeg_max_len=eeg_max_len, text_max_len=text_max_len)
-    val_dataset = HMCLoader(os.path.join(root, "eval"), val_files, is_instruct=is_instruct, is_val=True, eeg_max_len=eeg_max_len, text_max_len=text_max_len)
+    train_dataset = HMCLoader(os.path.join(root, "../train"), train_files, is_instruct=is_instruct,
+                              eeg_max_len=eeg_max_len, text_max_len=text_max_len)
+    test_dataset = HMCLoader(os.path.join(root, "test"), test_files, is_instruct=is_instruct, is_val=True,
+                             eeg_max_len=eeg_max_len, text_max_len=text_max_len)
+    val_dataset = HMCLoader(os.path.join(root, "eval"), val_files, is_instruct=is_instruct, is_val=True,
+                            eeg_max_len=eeg_max_len, text_max_len=text_max_len)
     print(len(train_files), len(val_files), len(test_files))
     return train_dataset, test_dataset, val_dataset
 
 
-def prepare_TUEV_dataset(root)->Tuple[Dataset, Dataset, Dataset]:
+def prepare_TUEV_dataset(root) -> Tuple[Dataset, Dataset, Dataset]:
     # set random seed
     seed = 4523
     np.random.seed(seed)
@@ -354,7 +358,7 @@ def prepare_TUEV_dataset(root)->Tuple[Dataset, Dataset, Dataset]:
     return train_dataset, test_dataset, val_dataset
 
 
-def prepare_TUAB_dataset(root)->Tuple[Dataset, Dataset, Dataset]:
+def prepare_TUAB_dataset(root) -> Tuple[Dataset, Dataset, Dataset]:
     # set random seed
     seed = 12345
     np.random.seed(seed)
@@ -375,23 +379,26 @@ def prepare_TUAB_dataset(root)->Tuple[Dataset, Dataset, Dataset]:
 
 
 def prepare_internal_dataset(cfg: ConfigProcEEGDataset,
-work_dir
-        # ds_path: Union[str, Path],
-        #                      class_labels: List[str],
-        #                      is_normal_abnormal: bool = False,
-        #                      metadata_csv_path: Optional[str] = None,
-        #                      data_split: List[float]=None,
-        #                      seed: int =4523
+                             work_dir: str = None
+                             # ds_path: Union[str, Path],
+                             #                      class_labels: List[str],
+                             #                      is_normal_abnormal: bool = False,
+                             #                      metadata_csv_path: Optional[str] = None,
+                             #                      data_split: List[float]=None,
+                             #                      seed: int =4523
                              ) -> Tuple[Dataset, Dataset, Dataset]:
     """Prepares stratified train/validation/test splits from internal dataset"""
-    if cfg.data_split is None or len(cfg.data_split) != 3:
-        cfg.data_split = [0.8, 0.1, 0.1]
-    assert sum(cfg.data_split) == 1.0, \
-        "data_split must sum to 1.0"
-    assert len(cfg.data_split) == 3, \
-        "data_split must have 3 elements: train, val, test"
+    # if cfg.data_split is None or len(cfg.data_split) != 3:
+    #     cfg.data_split = [0.8, 0.1, 0.1]
+    if cfg.fold_split_path is None and  sum(cfg.data_split) < 1.0:
+        raise RuntimeError("data_split must sum to 1.0")
+    elif not os.path.isfile(cfg.fold_split_path):
+        raise RuntimeError(f"fold_split_path {cfg.fold_split_path} does not exist")
+    # assert len(cfg.data_split) == 3, \
+    #     "data_split must have 3 elements: train, val, test"
 
-    cfg.metadata_csv_path = os.path.join(cfg.dataset_path, "metadata.csv") if cfg.metadata_csv_path is None else cfg.metadata_csv_path
+    cfg.metadata_csv_path = os.path.join(cfg.dataset_path,
+                                         "metadata.csv") if cfg.metadata_csv_path is None else cfg.metadata_csv_path
     assert os.path.isfile(cfg.metadata_csv_path), \
         f"metadata_csv_path {cfg.metadata_csv_path} does not exist"
     assert os.path.isdir(cfg.dataset_path), \
@@ -399,11 +406,11 @@ work_dir
     eeg_dataset = InternalDataset(cfg)
     assert len(eeg_dataset) > MIN_DATA_LENGTH, \
         f"No data found in {cfg.dataset_path}"
-    if cfg.fold_split_path is None:
+    if cfg.fold_split_path is None and work_dir is not None:
         data_split_ids = split_data_ids(eeg_dataset, cfg)
 
-        cfg.fold_split_path  = os.path.join(work_dir, 'fold_split_ids.yaml')
-        to_data_file(data_split_ids, cfg.fold_split_path )
+        cfg.fold_split_path = os.path.join(work_dir, 'fold_split_ids.yaml')
+        to_data_file(data_split_ids, cfg.fold_split_path)
     else:
         print(f"Loading fold_split_path from {cfg.fold_split_path}")
         data_split_ids = from_data_file(cfg.fold_split_path)
@@ -428,6 +435,7 @@ work_dir
 
     return train_dataset, valid_dataset, test_dataset
 
+
 def cross_validation_split_data_ids(eeg_dataset: InternalDataset,
                                     cfg: ConfigProcEEGDataset) -> List[Dict[str, List[str]]]:
     dataset_ids = eeg_dataset.id_keys
@@ -449,7 +457,7 @@ def split_data_ids(eeg_dataset: InternalDataset, cfg: ConfigProcEEGDataset) -> D
     train_id, valid_test_id = train_test_split(eeg_dataset.id_keys,
                                                train_size=cfg.data_split[0],
                                                random_state=cfg.seed_ds_split_train)
-    if cfg.data_split[2] >0:
+    if cfg.data_split[2] > 0:
         valid_id, test_id = train_test_split(valid_test_id,
                                              train_size=cfg.data_split[2] / (cfg.data_split[1] + cfg.data_split[2]),
                                              random_state=cfg.seed_ds_split_train)
@@ -463,7 +471,8 @@ def build_pretraining_dataset(datasets: list, time_window: list, stride_size=200
     shock_dataset_list = []
     ch_names_list = []
     for dataset_list, window_size in zip(datasets, time_window):
-        dataset = ShockDataset([Path(file_path) for file_path in dataset_list], window_size * 200, stride_size, start_percentage, end_percentage)
+        dataset = ShockDataset([Path(file_path) for file_path in dataset_list], window_size * 200, stride_size,
+                               start_percentage, end_percentage)
         shock_dataset_list.append(dataset)
         ch_names_list.append(dataset.get_ch_names())
     return shock_dataset_list, ch_names_list
