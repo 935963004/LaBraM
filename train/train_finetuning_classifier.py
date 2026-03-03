@@ -23,7 +23,7 @@ from tqdm import tqdm
 from configs.config_train import LossesWeightsConfig
 from data import eeg_consts
 from models.classifier_model import NeurolCodebookClassifier
-from train.evaluation import get_metrics
+from train.evaluation import get_eval_metrics, get_metrics
 from train.logers import MetricLogger
 from train.losses import get_vqnsp_losses, SpectralPatchedLoss
 from train.optimizers import get_loss_scale_for_deepspeed
@@ -220,7 +220,7 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
                         metrics: Optional[List[str]] = None,
                         is_binary: bool = True,
                         threshold: float = 0.5,
-                        losses_weights: LossesWeightsConfig = None) -> [Dict[str, float], pd.DataFrame, np.ndarray]:
+                        losses_weights: LossesWeightsConfig = None) -> [Dict[str, float], pd.DataFrame]:
     if metrics is None:
         metrics = ['acc']
     input_chans = None
@@ -272,7 +272,10 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
             prob_class_batch = prob_class_batch.cpu()
         target_class_batch = target_class_batch.cpu()
 
-        results_batch = get_metrics(prob_class_batch.numpy(), target_class_batch.numpy(), metrics, is_binary)
+        results_batch =  get_metrics(pred_probs=prob_class_batch.numpy(),
+                                          true_labels=target_class_batch.numpy(),
+                                          metrics=metrics,
+                                          is_binary=is_binary)
         pred_label.append(prob_class_batch)
         true_label.append(target_class_batch)
         id_key.append(id_key_batch)
@@ -301,18 +304,29 @@ def evaluate_classifier(data_loader: torch.utils.data.DataLoader,
                                'pred_label': pred_label[:, 0],
                                'true_label': true_label[:, 0]})
 
-    eval_metrics = get_metrics(pred_label, true_label, metrics, is_binary, threshold=threshold)
+    # metrics = ["pr_auc",
+    #            "roc_auc",
+    #            "accuracy",
+    #            "balanced_accuracy",
+    #            "f1",
+    #            "recall",
+    #            "precision"]  # binary classification
+    eval_metrics = get_eval_metrics(pred_probs=pred_label,
+                                    true_labels=true_label,
+                                    metrics=metrics,
+                                    is_binary=is_binary,
+                                    threshold=threshold)
 
     for key in losses_batch.keys():
         eval_metrics[key] = metric_logger.meters[key].global_avg
 
-    prob_class_batch = (pred_label > threshold).astype(float)
-    conf_matrix = sklearn_metrics.confusion_matrix(true_label, prob_class_batch, normalize='true')
-    if is_binary:
-        tn, fp, fn, tp = conf_matrix.ravel().tolist()
-        eval_metrics['tn'] = tn
-        eval_metrics['fp'] = fp
-        eval_metrics['fn'] = fn
-        eval_metrics['tp'] = tp
+    # prob_class_batch = (pred_label > threshold).astype(float)
+    # conf_matrix = sklearn_metrics.confusion_matrix(true_label, prob_class_batch, normalize='true')
+    # if is_binary:
+    #     tn, fp, fn, tp = conf_matrix.ravel().tolist()
+    #     eval_metrics['tn'] = tn
+    #     eval_metrics['fp'] = fp
+    #     eval_metrics['fn'] = fn
+    #     eval_metrics['tp'] = tp
 
-    return eval_metrics, results_df, conf_matrix
+    return eval_metrics, results_df
