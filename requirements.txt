@@ -2,7 +2,7 @@ timm==0.4.12
 Pillow
 blobfile
 mypy
-numpy
+numpy>=1.23,<2
 pytest
 requests
 einops
