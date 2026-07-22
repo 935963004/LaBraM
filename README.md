@@ -18,9 +18,15 @@ Create the environment and install dependencies:
 ```bash
 conda create -n labram python=3.11
 conda activate labram
-conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.8 -c pytorch -c nvidia
+conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.8 mkl=2023.1.0 -c pytorch -c nvidia
 conda install tensorboardX
 pip install -r requirements.txt
+```
+
+\[Optional\] if you intended to use `run_class_finetuning.py` with `--enable_deepspeed` flag (for distributed machine learning on clusters/multiple GPU):
+```bash
+conda activate labram
+pip install deepspeed==0.4.0 --no-build-isolation #will use conda env to build deepspeed instead of creating nested virtulenv
 ```
 
 ---
