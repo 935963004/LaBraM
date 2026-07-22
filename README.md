@@ -23,6 +23,12 @@ conda install tensorboardX
 pip install -r requirements.txt
 ```
 
+\[Optional\] if you intended to use `run_class_finetuning.py` with `--enable_deepspeed` flag (for distributed machine learning on clusters/multiple GPU):
+```bash
+conda activate labram
+pip install deepspeed==0.4.0 --no-build-isolation #will use conda env to build deepspeed instead of creating nested virtulenv
+```
+
 ---
 
 ## [IMPORTANT] Fine-tune on Your Own Dataset
